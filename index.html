@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Персональный планировщик задач, заметок и событий Google Calendar"
+    />
+    <meta name="theme-color" content="#e8e1d5" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; connect-src 'self' https://accounts.google.com https://www.googleapis.com; frame-src https://accounts.google.com; style-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
+    />
+    <title>Мой планировщик</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script type="module" src="./js/main.js"></script>
+  </head>
+  <body>
+    <div class="app-shell" data-app-shell>
+      <header class="topbar">
+        <div class="brand" aria-label="Мой планировщик">
+          <span class="brand__mark" aria-hidden="true">П</span>
+          <span class="brand__name">Планировщик</span>
+        </div>
+
+        <nav class="date-navigation" aria-label="Навигация по календарю">
+          <button class="button button--quiet" type="button" data-action="today">Сегодня</button>
+          <div class="button-pair" aria-label="Переключение недели">
+            <button class="icon-button" type="button" aria-label="Предыдущая неделя" data-action="previous-week">‹</button>
+            <button class="icon-button" type="button" aria-label="Следующая неделя" data-action="next-week">›</button>
+          </div>
+          <div class="period-heading" aria-live="polite">
+            <strong data-period-label>Текущая неделя</strong>
+            <span data-week-number>Неделя</span>
+          </div>
+        </nav>
+
+        <div class="topbar__actions">
+          <label class="search" aria-label="Общий поиск">
+            <span aria-hidden="true">⌕</span>
+            <input type="search" placeholder="Найти задачу или заметку" data-search-input />
+            <kbd>/</kbd>
+          </label>
+          <div class="google-status" data-google-status>
+            <span class="status-dot" aria-hidden="true"></span>
+            <span>Google не подключён</span>
+          </div>
+          <button class="button button--outline" type="button" data-action="connect-google">Подключить</button>
+          <button class="icon-button" type="button" aria-label="Открыть настройки" data-route="settings">⚙</button>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar" data-sidebar aria-label="Основная навигация">
+          <div class="sidebar__top">
+            <button class="create-button" type="button" aria-label="Создать" data-action="open-create-menu" aria-expanded="false">
+              <span aria-hidden="true">＋</span>
+              <span data-sidebar-label>Создать</span>
+            </button>
+            <div class="create-menu" data-create-menu hidden>
+              <button type="button" data-action="create-task">Новая задача <kbd>C</kbd></button>
+              <button type="button" data-action="create-note">Новая заметка <kbd>N</kbd></button>
+            </div>
+          </div>
+
+          <section class="mini-calendar" aria-label="Мини-календарь">
+            <div class="mini-calendar__header">
+              <strong data-mini-month>Месяц</strong>
+              <div class="mini-calendar__controls">
+                <button type="button" aria-label="Предыдущий месяц" data-action="previous-month">‹</button>
+                <button type="button" aria-label="Следующий месяц" data-action="next-month">›</button>
+              </div>
+            </div>
+            <div class="mini-calendar__weekdays" aria-hidden="true">
+              <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
+            </div>
+            <div class="mini-calendar__grid" data-mini-calendar-grid></div>
+          </section>
+
+          <nav class="primary-nav" aria-label="Разделы планировщика" data-primary-nav>
+            <button type="button" aria-label="Сегодня" data-route="today"><span aria-hidden="true">◉</span><span data-sidebar-label>Сегодня</span></button>
+            <button type="button" aria-label="Рабочие задачи" data-route="work"><span aria-hidden="true">▣</span><span data-sidebar-label>Рабочие задачи</span></button>
+            <button type="button" aria-label="Личные задачи" data-route="personal"><span aria-hidden="true">⌂</span><span data-sidebar-label>Личные задачи</span></button>
+            <button type="button" aria-label="Все задачи" data-route="tasks"><span aria-hidden="true">☷</span><span data-sidebar-label>Все задачи</span></button>
+            <button type="button" aria-label="Календарь" data-route="calendar" aria-current="page"><span aria-hidden="true">▦</span><span data-sidebar-label>Календарь</span></button>
+            <button type="button" aria-label="Заметки" data-route="notes"><span aria-hidden="true">▤</span><span data-sidebar-label>Заметки</span></button>
+            <button type="button" aria-label="Архив" data-route="archive"><span aria-hidden="true">□</span><span data-sidebar-label>Архив</span></button>
+            <button type="button" aria-label="Корзина" data-route="trash"><span aria-hidden="true">⌫</span><span data-sidebar-label>Корзина</span></button>
+          </nav>
+
+          <section class="calendar-sources" data-sidebar-label>
+            <h2>Календари</h2>
+            <button class="source-placeholder" type="button" data-action="connect-google">
+              <span class="source-placeholder__icon" aria-hidden="true">G</span>
+              <span><strong>Google Calendar</strong><small>Подключить календари</small></span>
+            </button>
+          </section>
+
+          <button class="sidebar-toggle" type="button" aria-label="Свернуть боковую панель" data-action="toggle-sidebar">
+            <span aria-hidden="true">«</span><span data-sidebar-label>Свернуть</span>
+          </button>
+        </aside>
+
+        <main class="main-content" id="main-content" tabindex="-1" data-main-content>
+          <section class="view" data-view-container aria-live="polite"></section>
+        </main>
+      </div>
+
+      <div class="scrim" data-scrim hidden></div>
+      <aside class="detail-panel" data-detail-panel aria-hidden="true" aria-labelledby="detail-panel-title">
+        <header class="detail-panel__header">
+          <div>
+            <span class="eyebrow">Первый этап</span>
+            <h2 id="detail-panel-title" data-panel-title>Панель</h2>
+          </div>
+          <button class="icon-button" type="button" aria-label="Закрыть панель" data-action="close-panel">×</button>
+        </header>
+        <div class="detail-panel__body" data-panel-body></div>
+      </aside>
+
+      <div class="dialog-layer" data-dialog-layer hidden>
+        <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+          <h2 id="dialog-title" data-dialog-title>Подтверждение</h2>
+          <p data-dialog-message></p>
+          <div class="dialog__actions">
+            <button class="button button--quiet" type="button" data-action="cancel-dialog">Отмена</button>
+            <button class="button button--primary" type="button" data-action="confirm-dialog">Продолжить</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="toast-region" role="status" aria-live="polite" aria-atomic="true" data-toast-region></div>
+      <div class="startup-status" data-startup-status role="status">Подготавливаем планировщик…</div>
+    </div>
+    <noscript>Для работы планировщика необходимо включить JavaScript.</noscript>
+  </body>
+</html>
