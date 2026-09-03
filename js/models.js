@@ -9,16 +9,20 @@ export class ValidationError extends Error {
   }
 }
 
-function text(value, maxLength) {
-  return String(value ?? "").trim().slice(0, maxLength);
+function rawText(value) {
+  return String(value ?? "").trim();
 }
 
-function uniqueTextArray(values, maxItems, maxLength) {
+function limitedText(value, maxLength) {
+  return rawText(value).slice(0, maxLength);
+}
+
+function normalizeTags(values) {
   const seen = new Set();
   return (Array.isArray(values) ? values : []).reduce((result, item) => {
-    const normalized = text(item, maxLength);
-    const key = normalized.toLocaleLowerCase("ru");
-    if (normalized && !seen.has(key) && result.length < maxItems) {
+    const normalized = rawText(item);
+    const key = normalized.toLocaleLowerCase("ru-RU");
+    if (normalized && !seen.has(key)) {
       seen.add(key);
       result.push(normalized);
     }
@@ -27,10 +31,21 @@ function uniqueTextArray(values, maxItems, maxLength) {
 }
 
 function normalizeLinks(values) {
-  return (Array.isArray(values) ? values : []).map((item) => ({
+  return (Array.isArray(values) ? values : [])
+    .map((item) => ({
+      id: item.id || crypto.randomUUID(),
+      label: rawText(item.label),
+      url: rawText(item.url),
+    }))
+    .filter((item) => item.label || item.url);
+}
+
+function normalizeChecklist(values) {
+  return (Array.isArray(values) ? values : []).map((item, index) => ({
     id: item.id || crypto.randomUUID(),
-    label: text(item.label, 120),
-    url: text(item.url, 2_048),
+    text: rawText(item.text),
+    isDone: Boolean(item.isDone),
+    order: Number.isInteger(item.order) ? item.order : index,
   }));
 }
 
@@ -38,22 +53,35 @@ function validateLinks(links, errors) {
   links.forEach((link, index) => {
     try {
       const url = new URL(link.url);
-      if (!(["http:", "https:"].includes(url.protocol))) throw new Error("protocol");
+      if (!["http:", "https:"].includes(url.protocol)) throw new Error("protocol");
     } catch {
       errors[`links.${index}.url`] = "Разрешены только корректные ссылки http:// или https://";
     }
   });
 }
 
+function validateTags(values, errors) {
+  const tags = normalizeTags(values);
+  if (tags.length > LIMITS.tags) errors.tags = `Можно добавить не больше ${LIMITS.tags} тегов`;
+  if (tags.some((tag) => tag.length > LIMITS.tagLength)) errors.tags = `Тег может содержать не больше ${LIMITS.tagLength} символов`;
+  return tags;
+}
+
 export function validateTask(input) {
   const errors = {};
-  const title = text(input.title, LIMITS.taskTitle);
+  const title = rawText(input.title);
+  const shortDescription = rawText(input.shortDescription);
+  const details = rawText(input.details);
   if (!title) errors.title = "Введите название";
+  else if (title.length > LIMITS.taskTitle) errors.title = `Не больше ${LIMITS.taskTitle} символов`;
+  if (shortDescription.length > LIMITS.taskShortDescription) errors.shortDescription = `Не больше ${LIMITS.taskShortDescription} символов`;
+  if (details.length > LIMITS.taskDetails) errors.details = `Не больше ${LIMITS.taskDetails} символов`;
   if (!isValidDateString(input.date)) errors.date = "Выберите корректную дату";
   if (!CATEGORIES.includes(input.category)) errors.category = "Выберите категорию";
   if (!PRIORITIES.includes(input.priority)) errors.priority = "Выберите приоритет";
   if (!TASK_STATUSES.includes(input.status)) errors.status = "Некорректный статус";
   if (input.hasTime && !isValidTimeString(input.startTime)) errors.startTime = "Укажите время";
+  else if (input.hasTime && Number(input.startTime.slice(3, 5)) % 15 !== 0) errors.startTime = "Время выбирается с шагом 15 минут";
   if (input.hasTime) {
     const duration = Number(input.durationMinutes);
     if (!Number.isInteger(duration) || duration < LIMITS.durationMin || duration > LIMITS.durationMax || duration % 15 !== 0) {
@@ -62,15 +90,24 @@ export function validateTask(input) {
   }
   const links = normalizeLinks(input.links);
   validateLinks(links, errors);
-  return { valid: Object.keys(errors).length === 0, errors, normalized: { ...input, title, links } };
+  const tags = validateTags(input.tags, errors);
+  const checklist = normalizeChecklist(input.checklist);
+  if (checklist.length > LIMITS.checklist) errors.checklist = `Можно добавить не больше ${LIMITS.checklist} пунктов`;
+  if (checklist.some((item) => !item.text)) errors.checklist = "Пустые пункты чек-листа нужно удалить";
+  return {
+    valid: Object.keys(errors).length === 0,
+    errors,
+    normalized: { ...input, title, shortDescription, details, links, tags, checklist },
+  };
 }
 
 export function createTask(input, now = new Date()) {
+  const timestamp = toUtcTimestamp(now);
   const base = {
     id: input.id || crypto.randomUUID(),
     title: input.title,
-    shortDescription: text(input.shortDescription, LIMITS.taskShortDescription),
-    details: text(input.details, LIMITS.taskDetails),
+    shortDescription: input.shortDescription || "",
+    details: input.details || "",
     date: input.date,
     hasTime: Boolean(input.hasTime),
     startTime: input.hasTime ? input.startTime : null,
@@ -82,15 +119,15 @@ export function createTask(input, now = new Date()) {
     cancelledAt: input.cancelledAt || null,
     archivedAt: input.archivedAt || null,
     trashedAt: input.trashedAt || null,
-    links: normalizeLinks(input.links),
-    tags: uniqueTextArray(input.tags, LIMITS.tags, LIMITS.tagLength),
-    checklist: Array.isArray(input.checklist) ? input.checklist.slice(0, LIMITS.checklist) : [],
+    links: input.links || [],
+    tags: input.tags || [],
+    checklist: input.checklist || [],
     recurrence: input.recurrence || null,
     seriesId: input.seriesId || null,
     recurrenceId: input.recurrenceId || null,
     googleSync: input.googleSync || null,
-    createdAt: input.createdAt || toUtcTimestamp(now),
-    updatedAt: toUtcTimestamp(now),
+    createdAt: input.createdAt || timestamp,
+    updatedAt: timestamp,
     revision: Number.isInteger(input.revision) ? input.revision : 1,
   };
   const result = validateTask(base);
@@ -98,27 +135,34 @@ export function createTask(input, now = new Date()) {
   return { ...base, ...result.normalized };
 }
 
+export function updateTaskRecord(existing, patch, now = new Date()) {
+  if (!existing?.id) throw new TypeError("Для обновления нужна существующая задача");
+  return createTask({ ...existing, ...patch, id: existing.id, createdAt: existing.createdAt, revision: existing.revision + 1 }, now);
+}
+
 export function validateNote(input) {
   const errors = {};
-  const title = text(input.title, LIMITS.noteTitle);
+  const title = rawText(input.title);
   if (!title) errors.title = "Введите название";
+  else if (title.length > LIMITS.noteTitle) errors.title = `Не больше ${LIMITS.noteTitle} символов`;
   if (!CATEGORIES.includes(input.category)) errors.category = "Выберите категорию";
   if (!PRIORITIES.includes(input.priority)) errors.priority = "Выберите приоритет";
   const links = normalizeLinks(input.links);
   validateLinks(links, errors);
-  return { valid: Object.keys(errors).length === 0, errors, normalized: { ...input, title, links } };
+  const tags = validateTags(input.tags, errors);
+  return { valid: Object.keys(errors).length === 0, errors, normalized: { ...input, title, links, tags } };
 }
 
 export function createNote(input, now = new Date()) {
   const base = {
     id: input.id || crypto.randomUUID(),
     title: input.title,
-    text: text(input.text, LIMITS.noteText),
+    text: limitedText(input.text, LIMITS.noteText),
     category: input.category,
     priority: input.priority || "medium",
     isPinned: Boolean(input.isPinned),
-    tags: uniqueTextArray(input.tags, LIMITS.tags, LIMITS.tagLength),
-    links: normalizeLinks(input.links),
+    tags: input.tags || [],
+    links: input.links || [],
     archivedAt: input.archivedAt || null,
     trashedAt: input.trashedAt || null,
     createdAt: input.createdAt || toUtcTimestamp(now),

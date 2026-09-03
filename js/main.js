@@ -33,7 +33,9 @@ async function start() {
     }
   });
 
-  ui.mount();
+  const cleanup = await repositories.tasks.cleanupExpiredTrash();
+  await ui.mount();
+  if (cleanup.deleted) ui.showToast(`Из корзины удалено устаревших задач: ${cleanup.deleted}`);
   state.set({ ready: true });
   if (!window.location.hash) router.navigate(state.get().route, { replace: true });
 
@@ -48,6 +50,7 @@ async function start() {
     schemaVersion: database.version,
     storeNames: Array.from(database.objectStoreNames),
     route: () => state.get().route,
+    taskCount: () => repositories.tasks.getAll().then((tasks) => tasks.length),
   });
 }
 
