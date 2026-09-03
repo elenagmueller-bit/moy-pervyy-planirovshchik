@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Самопроверка этапа 3</title>
+    <link rel="stylesheet" href="../style.css" />
+    <style>
+      body { min-width: 0; max-width: 1100px; margin: 30px auto; padding: 0 20px; }
+      .test-results { margin-bottom: 24px; padding: 20px; border-radius: 12px; background: #fffdf8; }
+      .test-results li { margin: 6px 0; }
+      [data-test-mount] { height: 700px; }
+    </style>
+    <script type="module" src="./stage3.js"></script>
+  </head>
+  <body>
+    <section class="test-results">
+      <h1>Самопроверка этапа 3</h1>
+      <p data-summary>Проверяем…</p>
+      <ol data-results></ol>
+    </section>
+    <div data-test-mount></div>
+  </body>
+</html>

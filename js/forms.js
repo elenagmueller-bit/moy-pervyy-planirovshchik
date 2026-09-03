@@ -146,24 +146,25 @@ function showErrors(form, errors) {
   });
 }
 
-export function createTaskForm({ task = null, onSave }) {
+export function createTaskForm({ task = null, defaults = null, onSave }) {
   const form = node("form", "task-form");
   form.noValidate = true;
   form.dataset.dirty = "false";
-  const title = input("title", "text", task?.title);
+  const initial = task || defaults || {};
+  const title = input("title", "text", initial.title);
   title.maxLength = LIMITS.taskTitle;
   title.placeholder = "Например, подготовить отчёт";
-  const shortDescription = input("shortDescription", "text", task?.shortDescription);
+  const shortDescription = input("shortDescription", "text", initial.shortDescription);
   shortDescription.maxLength = LIMITS.taskShortDescription;
-  const details = textarea("details", task?.details, 5);
+  const details = textarea("details", initial.details, 5);
   details.maxLength = LIMITS.taskDetails;
-  const date = input("date", "date", task?.date);
-  const category = select("category", [["", "Выберите категорию"], ["work", "Работа"], ["personal", "Личное"]], task?.category || "");
-  const priority = select("priority", [["high", "Высокий"], ["medium", "Средний"], ["low", "Низкий"]], task?.priority || "medium");
-  const hasTime = input("hasTime", "checkbox", task?.hasTime);
-  const startTime = input("startTime", "time", task?.startTime);
+  const date = input("date", "date", initial.date);
+  const category = select("category", [["", "Выберите категорию"], ["work", "Работа"], ["personal", "Личное"]], initial.category || "");
+  const priority = select("priority", [["high", "Высокий"], ["medium", "Средний"], ["low", "Низкий"]], initial.priority || "medium");
+  const hasTime = input("hasTime", "checkbox", initial.hasTime);
+  const startTime = input("startTime", "time", initial.startTime);
   startTime.step = "900";
-  const duration = input("durationMinutes", "number", task?.durationMinutes ?? 15);
+  const duration = input("durationMinutes", "number", initial.durationMinutes ?? 15);
   duration.min = String(LIMITS.durationMin);
   duration.max = String(LIMITS.durationMax);
   duration.step = "15";
@@ -178,7 +179,7 @@ export function createTaskForm({ task = null, onSave }) {
 
   const checklist = node("div", "repeater", undefined);
   checklist.dataset.checklist = "";
-  renderChecklist(checklist, task?.checklist || []);
+  renderChecklist(checklist, initial.checklist || []);
   const addChecklist = node("button", "button button--quiet button--small", "+ Пункт чек-листа");
   addChecklist.type = "button";
   addChecklist.addEventListener("click", () => {
@@ -195,7 +196,7 @@ export function createTaskForm({ task = null, onSave }) {
 
   const links = node("div", "repeater");
   links.dataset.links = "";
-  renderLinks(links, task?.links || []);
+  renderLinks(links, initial.links || []);
   const addLink = node("button", "button button--quiet button--small", "+ Ссылка");
   addLink.type = "button";
   addLink.addEventListener("click", () => {
@@ -209,7 +210,7 @@ export function createTaskForm({ task = null, onSave }) {
     form.dataset.dirty = "true";
   });
 
-  const tags = input("tags", "text", task?.tags?.join(", ") || "");
+  const tags = input("tags", "text", initial.tags?.join(", ") || "");
   tags.placeholder = "Через запятую";
   const checklistError = node("small", "form-field__error");
   checklistError.dataset.errorFor = "checklist";
@@ -268,7 +269,8 @@ export function createTaskForm({ task = null, onSave }) {
     submit.disabled = true;
     submit.textContent = "Сохраняем…";
     try {
-      await onSave(validation.normalized);
+      const saved = await onSave(validation.normalized);
+      if (saved === false) return;
       form.dataset.dirty = "false";
     } catch (error) {
       const message = node("div", "form-error", error.name === "VersionError" ? "Задача уже изменена в другой вкладке. Откройте её заново." : "Не удалось сохранить задачу. Введённые данные оставлены в форме.");

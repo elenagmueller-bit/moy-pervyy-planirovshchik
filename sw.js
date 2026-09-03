@@ -1,4 +1,4 @@
-const CACHE_NAME = "planner-shell-v3";
+const CACHE_NAME = "planner-shell-v5";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -38,6 +38,7 @@ self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+  if (url.pathname.includes("/tests/")) return;
 
   if (event.request.mode === "navigate") {
     event.respondWith(fetch(event.request).catch(() => caches.match("./index.html")));

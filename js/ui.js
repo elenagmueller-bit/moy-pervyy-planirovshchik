@@ -2,7 +2,7 @@ import { STORAGE_KEYS } from "./config.js";
 import { addCalendarDays, combineLocalDateTime, formatLocalDate, formatPeriodLabel, getISOWeek, getSystemTimeZone, monthMatrix, todayString } from "./date-utils.js";
 import { createTaskForm, createTaskViewer } from "./forms.js";
 import { filterTasks, isTaskOverdue, sortTasks, taskDeletionDate } from "./repositories.js";
-import { renderWeekCalendar } from "./calendar-view.js";
+import { findTaskConflicts, renderWeekCalendar } from "./calendar-view.js";
 
 const ROUTE_COPY = Object.freeze({
   today: ["Сегодня", "Задачи текущего дня и просроченные дела", "◉"],
@@ -332,7 +332,15 @@ export function createUI({ state, router, repositories }) {
   function renderRoute(currentState) {
     const taskRoutes = ["today", "work", "personal", "tasks", "archive", "trash"];
     const content = currentState.route === "calendar"
-      ? renderWeekCalendar(currentState.visibleWeek)
+      ? renderWeekCalendar(currentState.visibleWeek, {
+        tasks,
+        onCreate: (defaults) => openTaskForm(null, defaults),
+        onOpen: openTaskViewer,
+        onMove: moveCalendarTask,
+        onResize: resizeCalendarTask,
+        scrollTop: Number(localStorage.getItem(STORAGE_KEYS.calendarScroll)) || 0,
+        onScroll: (scrollTop) => localStorage.setItem(STORAGE_KEYS.calendarScroll, String(Math.round(scrollTop))),
+      })
       : taskRoutes.includes(currentState.route) ? renderTaskRoute(currentState.route) : renderNonTaskView(currentState.route);
     viewContainer.replaceChildren(content);
     document.querySelectorAll("[data-route]").forEach((control) => {
@@ -392,7 +400,19 @@ export function createUI({ state, router, repositories }) {
     const source = task ? { ...task, ...patch } : patch;
     const form = createTaskForm({
       task: task ? source : null,
+      defaults: task ? null : source,
       onSave: async (values) => {
+        if (findTaskConflicts(values, tasks).length) {
+          const proceed = await showDialog({
+            title: "Есть пересечение",
+            message: "На это время уже запланировано событие. Всё равно сохранить?",
+            choices: [
+              { value: false, label: "Вернуться к выбору времени" },
+              { value: true, label: "Сохранить", kind: "primary" },
+            ],
+          });
+          if (!proceed) return false;
+        }
         if (task) await repositories.tasks.update(task.id, values, { expectedRevision: task.revision });
         else await repositories.tasks.create({ ...source, ...values });
         await refreshTasks();
@@ -401,6 +421,34 @@ export function createUI({ state, router, repositories }) {
       },
     });
     revealPanel(task ? "Редактирование" : "Новая задача", task ? task.title : "Новая задача", form, { kind: "task-form", taskId: task?.id || null });
+  }
+
+  async function confirmCalendarConflict(candidate) {
+    if (!findTaskConflicts(candidate, tasks).length) return true;
+    return showDialog({
+      title: "Есть пересечение",
+      message: "На это время уже запланировано событие. Всё равно сохранить?",
+      choices: [
+        { value: false, label: "Вернуться к выбору времени" },
+        { value: true, label: "Сохранить", kind: "primary" },
+      ],
+    });
+  }
+
+  async function moveCalendarTask(task, patch) {
+    const candidate = { ...task, ...patch };
+    if (!(await confirmCalendarConflict(candidate))) return;
+    await repositories.tasks.update(task.id, patch, { expectedRevision: task.revision });
+    await refreshTasks();
+    showToast("Задача перенесена");
+  }
+
+  async function resizeCalendarTask(task, durationMinutes) {
+    const candidate = { ...task, durationMinutes };
+    if (!(await confirmCalendarConflict(candidate))) return renderRoute(state.get());
+    await repositories.tasks.update(task.id, { durationMinutes }, { expectedRevision: task.revision });
+    await refreshTasks();
+    showToast("Длительность изменена");
   }
 
   function viewActions(task) {
