@@ -1,10 +1,20 @@
-import { CALENDAR_TIME_ZONES, STORAGE_KEYS } from "./config.js";
+import { CALENDAR_TIME_ZONES, LIMITS, STORAGE_KEYS } from "./config.js";
 import { addCalendarDays, combineLocalDateTime, dateStringInZone, endOfISOWeek, formatLocalDate, formatPeriodLabel, getISOWeek, getSystemTimeZone, monthMatrix, startOfISOWeek, wallClockDateInZone } from "./date-utils.js";
-import { createNoteForm, createNoteViewer, createTaskForm, createTaskViewer } from "./forms.js?v=0.6.0";
-import { filterNotes, filterTasks, isTaskOverdue, sortNotes, sortTasks, taskDeletionDate } from "./repositories.js?v=0.6.0";
-import { findTaskConflicts, renderWeekCalendar } from "./calendar-view.js?v=0.6.0";
-import { backupFileName, clearLocalData, createBackup, importBackup, importPreview, parseBackup } from "./backup.js?v=0.6.0";
-import { searchPlanner } from "./search.js?v=0.6.0";
+import { createNoteForm, createNoteViewer, createTaskForm, createTaskViewer } from "./forms.js?v=0.8.0";
+import { filterNotes, filterTasks, isTaskOverdue, sortNotes, sortTasks, taskDeletionDate } from "./repositories.js?v=0.8.0";
+import { findTaskConflicts, renderWeekCalendar } from "./calendar-view.js?v=0.8.0";
+import { backupFileName, clearLocalData, createBackup, importBackup, importPreview, parseBackup } from "./backup.js?v=0.8.0";
+import { searchPlanner } from "./search.js?v=0.8.0";
+
+export function paginateItems(items, limit = LIMITS.listPageSize) {
+  const safeLimit = Math.max(1, Number(limit) || LIMITS.listPageSize);
+  return Object.freeze({ items: items.slice(0, safeLimit), total: items.length, shown: Math.min(items.length, safeLimit), hasMore: items.length > safeLimit });
+}
+
+export function storagePressure(estimate) {
+  if (!estimate || !Number.isFinite(estimate.usage) || !Number.isFinite(estimate.quota) || estimate.quota <= 0) return null;
+  return estimate.usage / estimate.quota;
+}
 
 const ROUTE_COPY = Object.freeze({
   today: ["Сегодня", "Задачи текущего дня и просроченные дела", "◉"],
@@ -155,7 +165,7 @@ function renderTaskCard(task, route, now = new Date()) {
   );
   if (overdue) badges.append(element("span", "badge badge--overdue", "Просрочено"));
   if (task.recurrence) badges.append(element("span", "badge badge--recurring", "↻ Повторяется"));
-  if (task.googleSync) badges.append(element("span", "badge badge--google", task.googleSync.syncStatus === "synced" ? "G Синхронизирована" : "G Требует внимания"));
+  if (task.googleSync) badges.append(element("span", "badge badge--google", task.googleSync.syncStatus === "synced" ? "G Синхронизирована" : task.googleSync.syncStatus?.startsWith("pending") ? "G Ожидает отправки" : task.googleSync.syncStatus === "readOnlyRemote" ? "G Связь завершена" : "G Требует внимания"));
   if (task.seriesId && !task.isVirtual && !task.isSeriesRepresentative) badges.append(element("span", "badge", "Изменён экземпляр"));
   if (task.archivedAt) badges.append(element("span", "badge", "В архиве"));
   top.append(statusButton, copy, badges);
@@ -229,7 +239,7 @@ function renderTodayGroups(tasks, now) {
   return root;
 }
 
-export function createUI({ state, router, repositories, googleAuth, googleCalendar }) {
+export function createUI({ state, router, repositories, googleAuth, googleCalendar, syncEngine }) {
   const appShell = document.querySelector("[data-app-shell]");
   const viewContainer = document.querySelector("[data-view-container]");
   const detailPanel = document.querySelector("[data-detail-panel]");
@@ -251,6 +261,7 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
   let googleCalendars = [];
   let googleEvents = [];
   let appSettings = null;
+  let syncQueueCount = 0;
   let googleState = googleAuth.getState();
   let toastTimer = 0;
   let overduePromptShown = false;
@@ -261,7 +272,27 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
   let archiveEntity = "tasks";
   let searchState = { query: "", force: false, includeArchive: false, includeTrash: false };
   let panelContext = null;
+  let periodicSyncTimer = 0;
+  let searchTimer = 0;
+  const listLimits = new Map();
   let secondaryTimeZone = localStorage.getItem(STORAGE_KEYS.secondaryTimeZone) || "Europe/Samara";
+
+  function pageFor(key, items) {
+    return paginateItems(items, listLimits.get(key) || LIMITS.listPageSize);
+  }
+
+  function resetListPages() {
+    listLimits.clear();
+  }
+
+  function loadMoreControl(key, page) {
+    if (!page.hasMore) return null;
+    const control = element("button", "button button--outline load-more", `Показать ещё · ${page.total - page.shown}`);
+    control.type = "button";
+    control.dataset.action = "load-more";
+    control.dataset.listKey = key;
+    return control;
+  }
 
   function renderGoogleStatus() {
     const labels = {
@@ -271,22 +302,28 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
       expiring: "Скоро потребуется вход",
       expired: "Нужен вход в Google",
     };
-    googleStatus.querySelector("span:last-child").textContent = labels[googleState.state] || "Google не подключён";
+    const offline = !navigator.onLine;
+    const cacheLabel = appSettings?.lastSyncAt ? ` · данные на ${new Date(appSettings.lastSyncAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}` : "";
+    const text = offline ? `Офлайн${cacheLabel}` : syncQueueCount ? `${syncQueueCount} ждёт синхронизации` : labels[googleState.state] || "Google не подключён";
+    googleStatus.querySelector("span:last-child").textContent = text;
+    googleStatus.classList.toggle("is-offline", offline);
     googleStatus.classList.toggle("is-connected", googleState.authenticated);
     connectGoogleButton.textContent = googleState.authenticated ? "Обновить" : googleState.state === "expired" ? "Войти снова" : "Подключить";
   }
   googleAuth.subscribe((nextState) => { googleState = nextState; renderGoogleStatus(); });
+  syncEngine.subscribe((event) => { handleSyncEvent(event).catch(() => showToast("Не удалось обновить состояние синхронизации", "error")); });
 
   function renderCalendarSources() {
     const container = document.querySelector(".calendar-sources");
     container.replaceChildren(element("h2", "", "Календари"));
-    const selected = googleCalendars.filter((calendar) => calendar.selected);
-    if (!selected.length) {
+    if (!googleCalendars.length) {
       const control = element("button", "source-placeholder", "Google Calendar · подключить"); control.type = "button"; control.dataset.action = "connect-google"; container.append(control); return;
     }
-    selected.forEach((calendar) => {
-      const row = element("button", "source-placeholder", calendar.summary); row.type = "button"; row.dataset.route = "settings";
-      const color = element("span", "google-calendar-color"); color.style.backgroundColor = calendar.backgroundColor; row.prepend(color); container.append(row);
+    googleCalendars.forEach((calendar) => {
+      const row = element("label", "source-placeholder calendar-source-toggle");
+      const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = Boolean(calendar.selected); checkbox.value = calendar.id; checkbox.dataset.googleSidebarToggle = "";
+      const color = element("span", "google-calendar-color"); color.style.backgroundColor = calendar.backgroundColor;
+      row.append(checkbox, color, element("span", "calendar-source-name", calendar.summary)); container.append(row);
     });
   }
 
@@ -299,23 +336,82 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
 
   function showDialog({ title, message, choices }) {
     return new Promise((resolve) => {
+      const previousFocus = document.activeElement;
       const dialog = dialogLayer.querySelector(".dialog");
       dialog.querySelector("[data-dialog-title]").textContent = title;
       dialog.querySelector("[data-dialog-message]").textContent = message;
       const actions = dialog.querySelector(".dialog__actions");
       actions.replaceChildren();
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        dialogLayer.hidden = true;
+        dialogLayer.removeEventListener("keydown", onKeydown);
+        if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
+        resolve(value);
+      };
+      const onKeydown = (event) => {
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); finish(choices[0]?.value); return; }
+        if (event.key !== "Tab") return;
+        const focusable = [...actions.querySelectorAll("button:not(:disabled)")];
+        if (!focusable.length) return;
+        const first = focusable[0]; const last = focusable.at(-1);
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      };
       choices.forEach(({ value, label, kind = "quiet" }) => {
         const control = element("button", `button button--${kind}`, label);
         control.type = "button";
-        control.addEventListener("click", () => {
-          dialogLayer.hidden = true;
-          resolve(value);
-        }, { once: true });
+        control.addEventListener("click", () => finish(value), { once: true });
         actions.append(control);
       });
       dialogLayer.hidden = false;
+      dialogLayer.addEventListener("keydown", onKeydown);
       actions.lastElementChild?.focus();
     });
+  }
+
+  async function refreshQueueState() {
+    syncQueueCount = (await repositories.syncQueue.getAll()).length;
+    renderGoogleStatus();
+    if (state.get().route === "settings") renderRoute(state.get());
+  }
+
+  async function handleSyncEvent(event) {
+    if (["queued", "sent", "failed", "retry", "needsAuth"].includes(event.type)) await refreshQueueState();
+    if (["sent", "failed"].includes(event.type)) await refreshTasks();
+    if (event.type === "calendarSynced") {
+      googleEvents = await repositories.googleEventsCache.getAll();
+      renderRoute(state.get());
+    }
+    if (event.type === "needsAuth") showToast("Изменения сохранены. Для отправки войдите в Google", "error");
+    if (event.type === "failed") showToast("Не удалось обновить Google Calendar. Задача сохранена локально", "error");
+    if (event.type === "remoteDeleted") {
+      await refreshTasks();
+      showToast("Связанное событие удалено в Google Calendar. Локальная задача сохранена", "error");
+    }
+    if (event.type === "conflict") {
+      await refreshTasks();
+      const choice = await showDialog({
+        title: "Событие изменилось в Google Calendar",
+        message: `Версия Google уже применена к задаче «${event.localVersion.title}». Локальные приоритет, категория, теги и чек-лист сохранены. Можно вернуть локальные дату и описание отдельным новым изменением.`,
+        choices: [
+          { value: "local", label: "Вернуть мои значения" },
+          { value: "google", label: "Оставить версию Google", kind: "primary" },
+        ],
+      });
+      if (choice === "local") await syncEngine.reapplyConflict(event.conflictId);
+      await refreshTasks();
+    }
+  }
+
+  async function backgroundSync() {
+    if (document.hidden || !navigator.onLine || !googleAuth.getAccessToken()) return false;
+    if (!syncQueueCount || googleState.canWrite) await syncEngine.flush();
+    if (googleCalendars.some((calendar) => calendar.selected)) await refreshGoogleEvents();
+    await loadStoredGoogleData();
+    return true;
   }
 
   function updatePeriod(currentState) {
@@ -378,6 +474,8 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
 
   function renderNoteRoute(source = "active") {
     const visible = sortNotes(filterNotes(notes, noteFilters, source), noteSort);
+    const pageKey = `notes:${source}`;
+    const page = pageFor(pageKey, visible);
     const card = element("section", "page-card");
     card.dataset.view = source === "active" ? "notes" : source;
     card.append(pageHeader(source === "active" ? "notes" : source, visible.length));
@@ -390,8 +488,8 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     if (source === "active") card.append(renderNoteFilters());
     if (!visible.length) card.append(emptyState(source === "active" ? "notes" : source));
     else {
-      const pinned = visible.filter((note) => note.isPinned);
-      const ordinary = visible.filter((note) => !note.isPinned);
+      const pinned = page.items.filter((note) => note.isPinned);
+      const ordinary = page.items.filter((note) => !note.isPinned);
       [["Закреплённые", pinned], [source === "active" ? "Остальные заметки" : "Заметки", ordinary]].forEach(([title, items]) => {
         if (!items.length) return;
         const section = element("section", "note-group");
@@ -401,6 +499,7 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
         section.append(list);
         card.append(section);
       });
+      const more = loadMoreControl(pageKey, page); if (more) card.append(more);
     }
     return card;
   }
@@ -426,22 +525,25 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
       empty.querySelector(".empty-state__content").append(reset); card.append(empty); return card;
     }
     if (result.tasks.length) {
+      const page = pageFor("search:tasks", result.tasks);
       const group = element("section", "task-group"); group.append(element("h2", "", `Задачи · ${result.tasks.length}`));
-      const list = element("div", "task-list"); result.tasks.forEach((task) => list.append(renderTaskCard(task, task.trashedAt ? "trash" : task.archivedAt ? "archive" : "tasks"))); group.append(list); card.append(group);
+      const list = element("div", "task-list"); page.items.forEach((task) => list.append(renderTaskCard(task, task.trashedAt ? "trash" : task.archivedAt ? "archive" : "tasks"))); group.append(list); const more = loadMoreControl("search:tasks", page); if (more) group.append(more); card.append(group);
     }
     if (result.notes.length) {
+      const page = pageFor("search:notes", result.notes);
       const group = element("section", "note-group"); group.append(element("h2", "", `Заметки · ${result.notes.length}`));
-      const list = element("div", "note-grid"); result.notes.forEach((note) => list.append(renderNoteCard(note, note.trashedAt ? "trash" : note.archivedAt ? "archive" : "active"))); group.append(list); card.append(group);
+      const list = element("div", "note-grid"); page.items.forEach((note) => list.append(renderNoteCard(note, note.trashedAt ? "trash" : note.archivedAt ? "archive" : "active"))); group.append(list); const more = loadMoreControl("search:notes", page); if (more) group.append(more); card.append(group);
     }
     if (result.googleEvents.length) {
+      const page = pageFor("search:google", result.googleEvents);
       const group = element("section", "note-group"); group.append(element("h2", "", `Google Calendar · ${result.googleEvents.length}`));
       const list = element("div", "note-grid");
-      result.googleEvents.forEach((event) => {
+      page.items.forEach((event) => {
         const item = element("article", "note-card google-result-card"); item.dataset.googleEventKey = event.cacheKey;
         item.append(element("h2", "", event.title), element("p", "note-card__preview", `${event.calendarName} · ${event.date}${event.hasTime ? `, ${event.startTime}` : " · весь день"}`));
         const open = element("button", "button button--quiet", "Открыть"); open.type = "button"; open.dataset.googleAction = "view"; item.append(open); list.append(item);
       });
-      group.append(list); card.append(group);
+      group.append(list); const more = loadMoreControl("search:google", page); if (more) group.append(more); card.append(group);
     }
     return card;
   }
@@ -454,6 +556,8 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
       return section;
     }
     section.append(element("p", "", googleState.authenticated ? "Аккаунт подключён. Выберите календари для показа и один календарь для новых задач." : "Подключение запрашивает только чтение календарей. Право записи будет запрошено при первой отправке задачи."));
+    if (appSettings?.lastSyncAt) section.append(element("p", "google-cache-age", `Данные Google на ${new Date(appSettings.lastSyncAt).toLocaleString("ru-RU")}`));
+    if (syncQueueCount) section.append(element("p", "google-queue-status", `Ожидают отправки: ${syncQueueCount}`));
     const actions = element("div", "settings-actions");
     const connect = element("button", "button button--primary", googleState.authenticated ? "Обновить календари" : googleState.state === "expired" ? "Войти снова" : "Подключить Google Calendar"); connect.type = "button"; connect.dataset.action = "connect-google"; actions.append(connect);
     if (googleState.authenticated) {
@@ -512,6 +616,8 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
   function renderTaskRoute(route) {
     const now = wallClockDateInZone(new Date(), CALENDAR_TIME_ZONES.primary.id);
     const visible = sortTasks(filterTasks(tasks, route, filters, now), taskSort);
+    const pageKey = `tasks:${route}`;
+    const page = pageFor(pageKey, visible);
     const card = element("section", "page-card");
     card.dataset.view = route;
     card.append(pageHeader(route, visible.length));
@@ -529,12 +635,13 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     }
     card.append(renderFilters(filters, taskSort, route));
     if (!visible.length) card.append(emptyState(route));
-    else if (route === "today") card.append(renderTodayGroups(visible, now));
+    else if (route === "today") card.append(renderTodayGroups(page.items, now));
     else {
       const list = element("div", "task-list");
-      visible.forEach((task) => list.append(renderTaskCard(task, route, now)));
+      page.items.forEach((task) => list.append(renderTaskCard(task, route, now)));
       card.append(list);
     }
+    const more = loadMoreControl(pageKey, page); if (more) card.append(more);
     if (route === "trash" && visible.length) {
       const clear = element("button", "button button--danger trash-clear", "Очистить корзину");
       clear.type = "button";
@@ -551,7 +658,8 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
       : currentState.route === "calendar"
       ? renderWeekCalendar(currentState.visibleWeek, {
         tasks,
-        googleEvents,
+        googleEvents: googleEvents.filter((event) => googleCalendars.some((calendar) => calendar.id === event.calendarId && calendar.selected) && !tasks.some((task) => task.googleSync?.calendarId === event.calendarId && task.googleSync?.eventId === event.id && !task.googleSync?.endedAt)),
+        showFirstRunHint: !tasks.length && !googleEvents.length,
         onCreate: (defaults) => openTaskForm(null, defaults),
         onOpen: openTaskViewer,
         onOpenGoogle: openGoogleEventViewer,
@@ -586,12 +694,14 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     card.append(pageHeader("trash", taskVisible.length + noteVisible.length));
     if (!taskVisible.length && !noteVisible.length) card.append(emptyState("trash"));
     if (taskVisible.length) {
+      const page = pageFor("trash:tasks", taskVisible);
       const group = element("section", "task-group"); group.append(element("h2", "", `Задачи · ${taskVisible.length}`));
-      const list = element("div", "task-list"); taskVisible.forEach((task) => list.append(renderTaskCard(task, "trash"))); group.append(list); card.append(group);
+      const list = element("div", "task-list"); page.items.forEach((task) => list.append(renderTaskCard(task, "trash"))); group.append(list); const more = loadMoreControl("trash:tasks", page); if (more) group.append(more); card.append(group);
     }
     if (noteVisible.length) {
+      const page = pageFor("trash:notes", noteVisible);
       const group = element("section", "note-group"); group.append(element("h2", "", `Заметки · ${noteVisible.length}`));
-      const list = element("div", "note-grid"); noteVisible.forEach((note) => list.append(renderNoteCard(note, "trash"))); group.append(list); card.append(group);
+      const list = element("div", "note-grid"); page.items.forEach((note) => list.append(renderNoteCard(note, "trash"))); group.append(list); const more = loadMoreControl("trash:notes", page); if (more) group.append(more); card.append(group);
     }
     if (taskVisible.length || noteVisible.length) {
       const clear = element("button", "button button--danger trash-clear", "Очистить корзину"); clear.type = "button"; clear.dataset.action = "clear-all-trash"; card.append(clear);
@@ -610,11 +720,15 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
   }
 
   async function loadStoredGoogleData() {
-    [googleCalendars, googleEvents, appSettings] = await Promise.all([
+    let queue;
+    [googleCalendars, googleEvents, appSettings, queue] = await Promise.all([
       repositories.googleCalendars.getAll(),
       repositories.googleEventsCache.getAll(),
       repositories.settings.get("app"),
+      repositories.syncQueue.getAll(),
     ]);
+    syncQueueCount = queue.length;
+    renderGoogleStatus();
   }
 
   async function connectGoogle() {
@@ -624,7 +738,9 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
       return false;
     }
     try {
-      if (!googleState.authenticated) await googleAuth.requestReadAccess();
+      if (syncQueueCount && (!googleState.authenticated || !googleState.canWrite)) await googleAuth.requestWriteAccess();
+      else if (!googleState.authenticated) await googleAuth.requestReadAccess();
+      await syncEngine.flush();
       const previous = new Map(googleCalendars.map((calendar) => [calendar.id, calendar]));
       const received = await googleCalendar.listCalendars();
       googleCalendars = received.map((calendar) => ({ ...calendar, selected: previous.has(calendar.id) ? Boolean(previous.get(calendar.id).selected) : Boolean(calendar.primary) }));
@@ -647,16 +763,10 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
   }
 
   async function refreshGoogleEvents(rangeStart = null, rangeEnd = null) {
-    if (!googleAuth.getAccessToken()) return false;
-    const selected = googleCalendars.filter((calendar) => calendar.selected);
+    if (!googleAuth.getAccessToken() || !navigator.onLine) return false;
     const range = googleRangeDates(rangeStart, rangeEnd);
-    const loaded = [];
-    for (const calendar of selected) loaded.push(...await googleCalendar.listEvents(calendar, range));
-    const old = await repositories.googleEventsCache.getAll();
-    const selectedIds = new Set(selected.map((calendar) => calendar.id));
-    await Promise.all(old.filter((event) => selectedIds.has(event.calendarId)).map((event) => repositories.googleEventsCache.delete(event.cacheKey)));
-    await Promise.all(loaded.map((event) => repositories.googleEventsCache.put(event)));
-    googleEvents = [...old.filter((event) => !selectedIds.has(event.calendarId)), ...loaded];
+    await syncEngine.synchronizeCalendars(googleCalendars, range);
+    googleEvents = await repositories.googleEventsCache.getAll();
     appSettings = { ...(appSettings || { id: "app" }), googleCacheStart: range.start, googleCacheEnd: range.end, lastSyncAt: new Date().toISOString() };
     await repositories.settings.put(appSettings);
     renderRoute(state.get());
@@ -669,11 +779,8 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     const end = formatLocalDate(endOfISOWeek(visibleWeek));
     if (appSettings?.googleCacheStart <= start && appSettings?.googleCacheEnd >= end) return;
     const range = googleRangeDates(start, end);
-    const selected = googleCalendars.filter((calendar) => calendar.selected);
-    const loaded = [];
-    for (const calendar of selected) loaded.push(...await googleCalendar.listEvents(calendar, range));
-    await Promise.all(loaded.map((event) => repositories.googleEventsCache.put(event)));
-    const byKey = new Map(googleEvents.map((event) => [event.cacheKey, event])); loaded.forEach((event) => byKey.set(event.cacheKey, event)); googleEvents = [...byKey.values()];
+    await syncEngine.synchronizeCalendars(googleCalendars, range);
+    googleEvents = await repositories.googleEventsCache.getAll();
     appSettings = { ...(appSettings || { id: "app" }), googleCacheStart: !appSettings?.googleCacheStart || start < appSettings.googleCacheStart ? start : appSettings.googleCacheStart, googleCacheEnd: !appSettings?.googleCacheEnd || end > appSettings.googleCacheEnd ? end : appSettings.googleCacheEnd, lastSyncAt: new Date().toISOString() };
     await repositories.settings.put(appSettings); renderRoute(state.get());
   }
@@ -740,49 +847,19 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     return clean;
   }
 
-  function googleLink(calendarId, event, revision) {
-    return {
-      calendarId,
-      eventId: event.id,
-      etag: event.etag || null,
-      googleUpdatedAt: event.updated || null,
-      lastSyncedLocalRevision: revision,
-      syncStatus: "synced",
-      lastErrorCode: null,
-      lastErrorMessage: null,
-      lastAttemptAt: new Date().toISOString(),
-    };
-  }
-
-  async function putEntityGoogleSync(entity, isSeries, sync) {
-    if (isSeries) {
-      const current = await repositories.series.get(entity.id);
-      const updated = { ...current, template: { ...current.template, googleSync: sync }, updatedAt: new Date().toISOString(), revision: current.revision + 1 };
-      await repositories.series.put(updated); return updated;
-    }
-    return repositories.tasks.update(entity.id, { googleSync: sync });
-  }
-
   async function syncEntityToGoogle(entity, values, { isSeries = false, existingLink = null } = {}) {
     const calendarId = values.googleCalendarId || existingLink?.calendarId;
-    const pending = {
-      ...(existingLink || {}), calendarId, eventId: existingLink?.eventId || null,
-      syncStatus: existingLink?.eventId ? "pendingUpdate" : "pendingCreate", lastErrorCode: null, lastErrorMessage: null, lastAttemptAt: new Date().toISOString(),
-    };
-    const pendingEntity = await putEntityGoogleSync(entity, isSeries, pending);
-    const remoteTask = { ...withoutGoogleFormFields(values), id: entity.id, revision: entity.revision || 1 };
-    try {
-      const event = existingLink?.eventId
-        ? await googleCalendar.updateTask(calendarId, existingLink.eventId, remoteTask, existingLink.etag)
-        : await googleCalendar.insertTask(calendarId, remoteTask);
-      await putEntityGoogleSync(entity, isSeries, googleLink(calendarId, event, (pendingEntity.revision || entity.revision || 1) + 1));
-      showToast("Задача сохранена и отправлена в Google Calendar", "success");
-      return true;
-    } catch (error) {
-      await putEntityGoogleSync(entity, isSeries, { ...pending, syncStatus: "error", lastErrorCode: String(error.status || error.name || "GOOGLE_ERROR"), lastErrorMessage: error.message || "Не удалось обновить Google Calendar" });
-      showToast("Не удалось обновить Google Calendar. Задача сохранена локально", "error");
+    await syncEngine.queueEntity(entity, { action: existingLink?.eventId ? "update" : "create", calendarId, eventId: existingLink?.eventId || null, etag: existingLink?.etag || null, isSeries });
+    if (!navigator.onLine || !googleAuth.getAccessToken()) {
+      await loadStoredGoogleData();
+      showToast("Изменения сохранены и будут отправлены в Google после подключения");
       return false;
     }
+    const result = await syncEngine.flush();
+    await loadStoredGoogleData();
+    if (result.pending) showToast("Изменения сохранены и ожидают синхронизации");
+    else showToast("Задача сохранена и отправлена в Google Calendar", "success");
+    return !result.pending;
   }
 
   async function requestClosePanel() {
@@ -835,15 +912,30 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
           });
           if (!proceed) return false;
         }
-        const existingLink = task?.googleSync || null;
+        let saveBase = task;
+        if (task && !task.seriesId) {
+          const latest = await repositories.tasks.get(task.id);
+          if (latest && latest.revision !== task.revision) {
+            const resolution = await showDialog({
+              title: "Задача изменена в другой вкладке",
+              message: "Можно загрузить последнюю версию или сохранить введённые значения как новую редакцию.",
+              choices: [
+                { value: "overwrite", label: "Сохранить мою редакцию" },
+                { value: "reload", label: "Загрузить новую версию", kind: "primary" },
+              ],
+            });
+            if (resolution === "reload") { closePanelImmediately(); openTaskForm(latest); return false; }
+            saveBase = latest;
+          }
+        }
+        const existingLink = saveBase?.googleSync?.endedAt ? null : saveBase?.googleSync || null;
         let unlinkChoice = "keep";
         if (existingLink && !values.googleEnabled) {
           unlinkChoice = await showDialog({ title: "Отключить задачу от Google?", message: "Можно оставить событие в Google Calendar или удалить его вместе с отключением связи.", choices: [{ value: "delete", label: "Удалить событие и отключить", kind: "danger" }, { value: "keep", label: "Только отключить связь", kind: "primary" }] });
         }
-        let writeAllowed = googleState.canWrite;
-        if (values.googleEnabled && !writeAllowed) {
-          try { await googleAuth.requestWriteAccess(); writeAllowed = true; }
-          catch { writeAllowed = false; }
+        if (values.googleEnabled && !googleState.canWrite && navigator.onLine) {
+          try { await googleAuth.requestWriteAccess(); }
+          catch { /* локальная запись всё равно попадёт в очередь */ }
         }
         const storageValues = withoutGoogleFormFields(values);
         if (!values.googleEnabled) storageValues.googleSync = null;
@@ -852,7 +944,7 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
           const scope = await chooseSeriesScope("Изменить");
           saved = await repositories.recurrence.changeOccurrence(task, storageValues, scope);
         } else if (task && values.recurrence) saved = await repositories.recurrence.replaceTaskWithSeries(task.id, storageValues);
-        else if (task) saved = await repositories.tasks.update(task.id, storageValues, { expectedRevision: task.revision });
+        else if (task) saved = await repositories.tasks.update(task.id, storageValues, { expectedRevision: saveBase.revision });
         else if (conversionNote && values.recurrence) {
           saved = await repositories.recurrence.createFromTask({ ...source, ...storageValues });
           await repositories.notes.archive(conversionNote.id);
@@ -860,15 +952,11 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
         else if (values.recurrence) saved = await repositories.recurrence.createFromTask({ ...source, ...storageValues });
         else saved = await repositories.tasks.create({ ...source, ...storageValues });
         if (existingLink && !values.googleEnabled && unlinkChoice === "delete") {
-          try { await googleCalendar.deleteEvent(existingLink.calendarId, existingLink.eventId, existingLink.etag); }
-          catch { showToast("Связь отключена, но удалить событие Google не удалось", "error"); }
+          await syncEngine.queueEntity({ ...saved, googleSync: existingLink }, { action: "delete", calendarId: existingLink.calendarId, eventId: existingLink.eventId, etag: existingLink.etag, isSeries: Boolean(saved.template) });
+          await syncEngine.flush();
         }
         if (values.googleEnabled) {
-          if (writeAllowed) await syncEntityToGoogle(saved, values, { isSeries: Boolean(saved.template), existingLink });
-          else {
-            await putEntityGoogleSync(saved, Boolean(saved.template), { ...(existingLink || {}), calendarId: values.googleCalendarId, eventId: existingLink?.eventId || null, syncStatus: "error", lastErrorCode: "WRITE_SCOPE_DENIED", lastErrorMessage: "Нет разрешения на запись в Google Calendar", lastAttemptAt: new Date().toISOString() });
-            showToast("Задача сохранена локально. Google не предоставил разрешение на запись", "error");
-          }
+          await syncEntityToGoogle(saved, values, { isSeries: Boolean(saved.template), existingLink });
         }
         await refreshTasks();
         if (!values.googleEnabled) showToast(conversionNote ? "Заметка превращена в задачу и перемещена в архив" : task ? "Изменения сохранены" : "Задача добавлена в план");
@@ -895,7 +983,7 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     if (!(await confirmCalendarConflict(candidate))) return;
     const scope = task.seriesId ? await chooseSeriesScope("Перенести") : "instance";
     const saved = task.seriesId ? await repositories.recurrence.changeOccurrence(task, patch, scope) : await repositories.tasks.update(task.id, patch, { expectedRevision: task.revision });
-    if (task.googleSync && googleState.canWrite) await syncEntityToGoogle(saved, { ...task, ...patch, googleEnabled: true, googleCalendarId: task.googleSync.calendarId }, { isSeries: Boolean(saved.template), existingLink: task.googleSync });
+    if (task.googleSync && !task.googleSync.endedAt) await syncEntityToGoogle(saved, { ...task, ...patch, googleEnabled: true, googleCalendarId: task.googleSync.calendarId }, { isSeries: Boolean(saved.template), existingLink: task.googleSync });
     await refreshTasks();
     showToast("Задача перенесена");
   }
@@ -905,7 +993,7 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     if (!(await confirmCalendarConflict(candidate))) return renderRoute(state.get());
     const scope = task.seriesId ? await chooseSeriesScope("Изменить длительность") : "instance";
     const saved = task.seriesId ? await repositories.recurrence.changeOccurrence(task, { durationMinutes }, scope) : await repositories.tasks.update(task.id, { durationMinutes }, { expectedRevision: task.revision });
-    if (task.googleSync && googleState.canWrite) await syncEntityToGoogle(saved, { ...task, durationMinutes, googleEnabled: true, googleCalendarId: task.googleSync.calendarId }, { isSeries: Boolean(saved.template), existingLink: task.googleSync });
+    if (task.googleSync && !task.googleSync.endedAt) await syncEntityToGoogle(saved, { ...task, durationMinutes, googleEnabled: true, googleCalendarId: task.googleSync.calendarId }, { isSeries: Boolean(saved.template), existingLink: task.googleSync });
     await refreshTasks();
     showToast("Длительность изменена");
   }
@@ -915,6 +1003,7 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     if (task.archivedAt) return [{ label: "Восстановить", action: "restore-archive" }, { label: "В корзину", action: "trash", kind: "danger-quiet" }];
     return [
       { label: "Редактировать", action: "edit", kind: "primary" },
+      ...(task.googleSync?.syncStatus === "error" ? [{ label: "Повторить Google", action: "retry-google" }] : []),
       { label: task.status === "completed" ? "Вернуть в работу" : "Завершить", action: task.status === "completed" ? "reopen" : "complete", kind: "complete" },
       ...(task.status === "active" ? [{ label: "Отменить", action: "cancel" }] : []),
       { label: "В архив", action: "archive" },
@@ -973,9 +1062,9 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
       const row = element("div", "task-detail-row"); row.append(element("dt", "", label), element("dd", "", value)); details.append(row);
     });
     view.append(details);
-    if (event.htmlLink) {
+    if (event.htmlLink && navigator.onLine) {
       const link = element("a", "button button--outline", "Открыть в Google Calendar"); link.href = event.htmlLink; link.target = "_blank"; link.rel = "noopener noreferrer"; view.append(link);
-    }
+    } else if (event.htmlLink) view.append(element("p", "google-offline-note", "Ссылка Google Calendar недоступна офлайн"));
     revealPanel("Google Calendar · только просмотр", event.title, view, { kind: "google-event", googleEventKey: event.cacheKey });
   }
 
@@ -1022,6 +1111,12 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
   async function executeTaskAction(task, action) {
     if (action === "view") return openTaskViewer(task);
     if (action === "edit") return openTaskForm(task);
+    if (action === "retry-google") {
+      if (!googleAuth.getAccessToken() && navigator.onLine) {
+        try { await googleAuth.requestWriteAccess(); } catch { showToast("Вход в Google не завершён", "error"); return; }
+      }
+      await syncEngine.retry(task.id); await refreshTasks(); await refreshQueueState(); return;
+    }
     let scope = "instance";
     if (task.seriesId && ["cancel", "trash"].includes(action)) scope = await chooseSeriesScope(action === "cancel" ? "Отменить" : "Удалить");
     if (["cancel", "trash", "delete-forever"].includes(action) && !(await confirmTaskAction(task, action))) return;
@@ -1065,12 +1160,13 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
       showToast("Задача удалена навсегда");
     }
     if (googleDelete) {
-      try {
-        if (!googleState.canWrite) await googleAuth.requestWriteAccess();
-        await googleCalendar.deleteEvent(task.googleSync.calendarId, task.googleSync.eventId, task.googleSync.etag);
-        if (!task.seriesId) await repositories.tasks.update(task.id, { googleSync: null });
-        showToast("Событие Google удалено");
-      } catch { showToast("Задача сохранена локально, но событие Google удалить не удалось", "error"); }
+      if (!googleState.canWrite && navigator.onLine) {
+        try { await googleAuth.requestWriteAccess(); } catch { /* операция останется в очереди */ }
+      }
+      const current = task.seriesId ? await repositories.series.get(task.seriesId) : await repositories.tasks.get(task.id);
+      await syncEngine.queueEntity(current || task, { action: "delete", calendarId: task.googleSync.calendarId, eventId: task.googleSync.eventId, etag: task.googleSync.etag, isSeries: Boolean(current?.template) });
+      const result = await syncEngine.flush();
+      showToast(result.pending ? "Удаление события Google ожидает синхронизации" : "Событие Google удалено");
     }
     await refreshTasks();
     if (panelContext?.taskId === task.id) closePanelImmediately();
@@ -1215,7 +1311,15 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     router.navigate("calendar"); renderRoute(state.get()); showToast("Все локальные данные удалены");
   }
 
-  async function handleAction(action) {
+  async function handleAction(action, source = null) {
+    if (action === "load-more") {
+      const key = source?.dataset.listKey;
+      if (key) {
+        listLimits.set(key, (listLimits.get(key) || LIMITS.listPageSize) + LIMITS.listPageSize);
+        renderRoute(state.get());
+      }
+      return;
+    }
     const actions = {
       today: goToday,
       "previous-week": () => shiftWeek(-1),
@@ -1252,7 +1356,7 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     const routeButton = event.target.closest("[data-route]");
     if (routeButton) router.navigate(routeButton.dataset.route);
     const actionButton = event.target.closest("[data-action]");
-    if (actionButton) await handleAction(actionButton.dataset.action);
+    if (actionButton) await handleAction(actionButton.dataset.action, actionButton);
     const taskAction = event.target.closest("[data-task-action]");
     if (taskAction) {
       const row = taskAction.closest("[data-task-id]");
@@ -1267,7 +1371,12 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
       if (taskAction.dataset.taskAction === "overdue-bulk-today") {
         const ids = [...panelBody.querySelectorAll("[data-task-id]:has(input:checked)")].map((item) => item.dataset.taskId);
         const primaryToday = dateStringInZone(new Date(), CALENDAR_TIME_ZONES.primary.id);
-        await Promise.all(ids.map((id) => repositories.tasks.update(id, { date: primaryToday })));
+        for (const id of ids) {
+          const current = await repositories.tasks.get(id);
+          const saved = await repositories.tasks.update(id, { date: primaryToday });
+          if (current?.googleSync && !current.googleSync.endedAt) await syncEngine.queueEntity(saved, { action: "update", calendarId: current.googleSync.calendarId, eventId: current.googleSync.eventId, etag: current.googleSync.etag });
+        }
+        await syncEngine.flush();
         await refreshTasks();
         closePanelImmediately();
         showToast("Выбранные задачи перенесены на сегодня");
@@ -1296,6 +1405,7 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
   viewContainer.addEventListener("change", (event) => {
     if (event.target.matches(".search-options input")) {
       searchState = { ...searchState, [event.target.name]: event.target.checked };
+      resetListPages();
       renderRoute(state.get());
       return;
     }
@@ -1307,10 +1417,25 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
       else noteFilters = { ...noteFilters, [key]: control.value };
     } else if (control.name === "sort") taskSort = control.value;
     else filters = { ...filters, [control.name]: control.type === "checkbox" ? control.checked : control.value };
+    resetListPages();
     renderRoute(state.get());
   });
 
   document.addEventListener("change", async (event) => {
+    if (event.target.matches("[data-google-sidebar-toggle]")) {
+      const calendar = googleCalendars.find((item) => item.id === event.target.value);
+      if (!calendar) return;
+      calendar.selected = event.target.checked;
+      await repositories.googleCalendars.put(calendar);
+      const selectedGoogleCalendars = googleCalendars.filter((item) => item.selected).map((item) => item.id);
+      appSettings = { ...(appSettings || { id: "app" }), selectedGoogleCalendars };
+      await repositories.settings.put(appSettings);
+      renderRoute(state.get());
+      if (calendar.selected && googleAuth.getAccessToken() && navigator.onLine) {
+        refreshGoogleEvents().catch(() => showToast("Календарь включён, но события пока не удалось обновить", "error"));
+      }
+      return;
+    }
     if (event.target.matches("[data-backup-input]") && event.target.files?.[0]) {
       await handleBackupFile(event.target.files[0]);
       event.target.value = "";
@@ -1319,12 +1444,16 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
 
   const searchInput = document.querySelector("[data-search-input]");
   searchInput.addEventListener("input", () => {
-    searchState = { ...searchState, query: searchInput.value, force: false };
-    renderRoute(state.get());
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => {
+      searchState = { ...searchState, query: searchInput.value, force: false };
+      resetListPages();
+      renderRoute(state.get());
+    }, 200);
   });
   searchInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
-      event.preventDefault(); searchState = { ...searchState, query: searchInput.value, force: true }; renderRoute(state.get());
+      event.preventDefault(); window.clearTimeout(searchTimer); searchState = { ...searchState, query: searchInput.value, force: true }; resetListPages(); renderRoute(state.get());
     }
   });
 
@@ -1364,6 +1493,7 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     }
     updatePeriod(currentState);
     renderMiniCalendar(currentState);
+    if (currentState.online !== previous.online) renderGoogleStatus();
     if (currentState.route !== previous.route || currentState.visibleWeek.getTime() !== previous.visibleWeek.getTime()) {
       refreshTasks();
       if (currentState.route === "calendar") ensureGoogleWeek(currentState.visibleWeek).catch(() => showToast("Не удалось догрузить события Google", "error"));
@@ -1376,10 +1506,29 @@ export function createUI({ state, router, repositories, googleAuth, googleCalend
     updatePeriod(current);
     renderMiniCalendar(current);
     await Promise.all([refreshTasks({ render: false }), loadStoredGoogleData()]);
+    await syncEngine.cleanupConflicts();
     renderRoute(current);
+    if (navigator.storage?.estimate) {
+      navigator.storage.estimate().then((estimate) => {
+        const ratio = storagePressure(estimate);
+        if (ratio !== null && ratio >= LIMITS.storageWarningRatio) showToast("Хранилище заполнено более чем на 80%. Экспортируйте данные и очистите корзину", "error");
+      }).catch(() => {});
+    }
     window.requestAnimationFrame(() => startupStatus.classList.add("is-ready"));
     window.setTimeout(maybeShowOverdue, 250);
+    if (!periodicSyncTimer) periodicSyncTimer = window.setInterval(() => { backgroundSync().catch(() => {}); }, 300_000);
   }
 
-  return Object.freeze({ mount, showToast, refreshTasks, openTaskForm, requestClosePanel });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && syncEngine.isStale(appSettings?.lastSyncAt)) backgroundSync().catch(() => {});
+  });
+
+  async function handleOnline() {
+    renderGoogleStatus();
+    if (googleAuth.getAccessToken() && (!syncQueueCount || googleState.canWrite)) await backgroundSync();
+    else if (googleAuth.getAccessToken() && syncQueueCount) showToast("Соединение восстановлено. Подтвердите доступ Google для отправки изменений");
+    else if (syncQueueCount) showToast("Соединение восстановлено. Войдите в Google, чтобы отправить изменения");
+  }
+
+  return Object.freeze({ mount, showToast, refreshTasks, openTaskForm, requestClosePanel, handleOnline });
 }

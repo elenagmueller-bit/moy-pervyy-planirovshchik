@@ -1,11 +1,12 @@
 import { DEFAULT_ROUTE, STORAGE_KEYS } from "./config.js";
 import { openPlannerDatabase } from "./db.js";
-import { createRepositories } from "./repositories.js?v=0.6.0";
+import { createRepositories } from "./repositories.js?v=0.8.0";
 import { createRouter, routeFromHash } from "./router.js";
 import { createAppState } from "./state.js";
-import { createUI } from "./ui.js?v=0.6.0";
-import { createGoogleAuthService } from "./google-auth.js?v=0.6.0";
-import { createGoogleCalendarService } from "./google-calendar.js?v=0.6.0";
+import { createUI } from "./ui.js?v=0.8.0";
+import { createGoogleAuthService } from "./google-auth.js?v=0.8.0";
+import { createGoogleCalendarService } from "./google-calendar.js?v=0.8.0";
+import { createSyncEngine } from "./sync.js?v=0.8.0";
 
 function readBoolean(key) {
   return localStorage.getItem(key) === "true";
@@ -27,9 +28,10 @@ async function start() {
   const router = createRouter(state);
   const googleAuth = createGoogleAuthService();
   const googleCalendar = createGoogleCalendarService({ auth: googleAuth });
-  const ui = createUI({ state, router, repositories, googleAuth, googleCalendar });
+  const syncEngine = createSyncEngine({ repositories, googleAuth, googleCalendar });
+  const ui = createUI({ state, router, repositories, googleAuth, googleCalendar, syncEngine });
 
-  window.addEventListener("online", () => state.set({ online: true }));
+  window.addEventListener("online", () => { state.set({ online: true }); ui.handleOnline(); });
   window.addEventListener("offline", () => state.set({ online: false }));
   state.subscribe((current, previous) => {
     if (current.online !== previous.online) {

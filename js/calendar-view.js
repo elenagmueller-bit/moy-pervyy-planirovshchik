@@ -403,6 +403,7 @@ export function renderWeekCalendar(visibleWeek, options = {}) {
   headingActions.append(element("span", "eyebrow", "Основное время · Москва"), zoneControl);
   heading.append(headingCopy, headingActions);
   card.append(heading);
+  if (options.showFirstRunHint) card.append(element("p", "first-run-hint", "Добавьте первую задачу или подключите календари Google"));
 
   const header = element("div", "calendar-week-header");
   const corner = element("div", "calendar-header-corner");

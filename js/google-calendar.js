@@ -4,11 +4,12 @@ import { addCalendarDays } from "./date-utils.js";
 const API_ROOT = "https://www.googleapis.com/calendar/v3";
 
 export class GoogleApiError extends Error {
-  constructor(status, message, payload = null) {
+  constructor(status, message, payload = null, retryAfterMs = 0) {
     super(message || `Google Calendar API: ${status}`);
     this.name = "GoogleApiError";
     this.status = status;
     this.payload = payload;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -24,6 +25,14 @@ function appendPageToken(url, token) {
 
 function safeApiMessage(payload, fallback) {
   return payload?.error?.message || fallback;
+}
+
+function retryAfterMilliseconds(response) {
+  const value = response.headers?.get?.("Retry-After");
+  if (!value) return 0;
+  if (/^\d+$/.test(value)) return Number(value) * 1_000;
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : 0;
 }
 
 export function stableGoogleEventId(localId) {
@@ -134,7 +143,7 @@ export function createGoogleCalendarService({ auth, fetchImpl = globalThis.fetch
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(options.headers || {}) },
     });
     const payload = response.status === 204 ? null : await response.json().catch(() => null);
-    if (!response.ok) throw new GoogleApiError(response.status, safeApiMessage(payload, response.statusText), payload);
+    if (!response.ok) throw new GoogleApiError(response.status, safeApiMessage(payload, response.statusText), payload, retryAfterMilliseconds(response));
     return payload;
   }
 
@@ -161,11 +170,21 @@ export function createGoogleCalendarService({ auth, fetchImpl = globalThis.fetch
   }
 
   async function listEvents(calendar, { timeMin, timeMax }) {
-    const url = new URL(`${API_ROOT}/calendars/${encodeURIComponent(calendar.id)}/events`);
-    url.searchParams.set("singleEvents", "true"); url.searchParams.set("showDeleted", "true"); url.searchParams.set("maxResults", "2500");
-    url.searchParams.set("timeMin", timeMin); url.searchParams.set("timeMax", timeMax);
-    const events = await paged(url.toString());
-    return events.filter((event) => event.status !== "cancelled").map((event) => normalizeGoogleEvent(event, calendar)).filter(Boolean);
+    const result = await listEventChanges(calendar, { timeMin, timeMax });
+    return result.items.filter((event) => event.status !== "cancelled").map((event) => normalizeGoogleEvent(event, calendar)).filter(Boolean);
+  }
+
+  async function listEventChanges(calendar, { timeMin, timeMax, syncToken } = {}) {
+    const base = new URL(`${API_ROOT}/calendars/${encodeURIComponent(calendar.id)}/events`);
+    base.searchParams.set("singleEvents", "true"); base.searchParams.set("showDeleted", "true"); base.searchParams.set("maxResults", "2500");
+    if (syncToken) base.searchParams.set("syncToken", syncToken);
+    else { base.searchParams.set("timeMin", timeMin); base.searchParams.set("timeMax", timeMax); }
+    const items = []; let pageToken = null; let nextSyncToken = null;
+    do {
+      const url = new URL(base); if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const page = await request(url.toString()); items.push(...(page.items || [])); pageToken = page.nextPageToken || null; nextSyncToken = page.nextSyncToken || nextSyncToken;
+    } while (pageToken);
+    return { items, nextSyncToken };
   }
 
   async function insertTask(calendarId, task) {
@@ -188,5 +207,5 @@ export function createGoogleCalendarService({ auth, fetchImpl = globalThis.fetch
     return request(`/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=none`, { method: "DELETE", headers: etag ? { "If-Match": etag } : {} });
   }
 
-  return Object.freeze({ listCalendars, listEvents, insertTask, updateTask, deleteEvent, getEvent: (calendarId, eventId) => request(`/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`) });
+  return Object.freeze({ listCalendars, listEvents, listEventChanges, insertTask, updateTask, deleteEvent, getEvent: (calendarId, eventId) => request(`/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`) });
 }

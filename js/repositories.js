@@ -1,6 +1,6 @@
 import { LIMITS } from "./config.js";
 import { combineLocalDateTime, todayString, toUtcTimestamp } from "./date-utils.js";
-import { createNote, createTask, updateNoteRecord, updateTaskRecord } from "./models.js?v=0.6.0";
+import { createNote, createTask, updateNoteRecord, updateTaskRecord } from "./models.js?v=0.8.0";
 import { requestToPromise, runTransaction } from "./db.js";
 import { createSeriesRecord, expandSeries, previousOccurrenceDate, seriesRepresentative, splitSeriesRecords, updateWholeSeries } from "./recurrence.js";
 
@@ -187,7 +187,7 @@ export class GoogleIntegrationRepository {
 
   disconnect(now = new Date()) {
     const timestamp = toUtcTimestamp(now);
-    return runTransaction(this.database, ["tasks", "series", "googleEventsCache", "syncState"], "readwrite", async ({ tasks, series, googleEventsCache, syncState }) => {
+    return runTransaction(this.database, ["tasks", "series", "googleEventsCache", "syncState", "syncQueue"], "readwrite", async ({ tasks, series, googleEventsCache, syncState, syncQueue }) => {
       const taskRecords = await requestToPromise(tasks.getAll());
       for (const task of taskRecords.filter((item) => item.googleSync)) {
         const updated = updateTaskRecord(task, { googleSync: { ...task.googleSync, syncStatus: "error", lastErrorCode: "GOOGLE_DISCONNECTED", lastErrorMessage: "Google отключён", lastAttemptAt: timestamp } }, now);
@@ -199,6 +199,7 @@ export class GoogleIntegrationRepository {
       }
       await requestToPromise(googleEventsCache.clear());
       await requestToPromise(syncState.clear());
+      await requestToPromise(syncQueue.clear());
       return { tasks: taskRecords.filter((item) => item.googleSync).length, series: seriesRecords.filter((item) => item.template?.googleSync).length };
     });
   }

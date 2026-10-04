@@ -1,5 +1,5 @@
 import { LIMITS } from "./config.js";
-import { validateNote, validateTask } from "./models.js?v=0.6.0";
+import { validateNote, validateTask } from "./models.js?v=0.8.0";
 
 const PRIORITY_LABELS = Object.freeze({ high: "Высокий", medium: "Средний", low: "Низкий" });
 const CATEGORY_LABELS = Object.freeze({ work: "Работа", personal: "Личное" });
@@ -228,7 +228,7 @@ export function createTaskForm({ task = null, defaults = null, onSave, google: g
   linksError.dataset.errorFor = "links";
 
   const googleSwitch = node("label", "switch-row");
-  const google = input("google", "checkbox", Boolean(initial.googleSync || initial.googleEnabled));
+  const google = input("google", "checkbox", Boolean((initial.googleSync && !initial.googleSync.endedAt) || initial.googleEnabled));
   const googleHint = node("small", "", googleOptions.connected ? "Напоминание работает через Google Calendar за 10 минут" : "При включении потребуется подключить Google");
   googleSwitch.append(google, node("span", "", "Добавить в Google Calendar"), googleHint);
   const googleCalendar = select("googleCalendarId", [], initial.googleSync?.calendarId || googleOptions.defaultCalendarId || "");
@@ -352,7 +352,10 @@ export function createTaskForm({ task = null, defaults = null, onSave, google: g
       if (saved === false) return;
       form.dataset.dirty = "false";
     } catch (error) {
-      const message = node("div", "form-error", error.name === "VersionError" ? "Задача уже изменена в другой вкладке. Откройте её заново." : "Не удалось сохранить задачу. Введённые данные оставлены в форме.");
+      const copy = error.name === "VersionError" ? "Задача уже изменена в другой вкладке. Откройте её заново."
+        : error.name === "QuotaExceededError" ? "В хранилище браузера закончилось место. Экспортируйте данные и очистите корзину."
+        : "Не удалось сохранить задачу. Введённые данные оставлены в форме.";
+      const message = node("div", "form-error", copy);
       actions.prepend(message);
     } finally {
       form.dataset.saving = "false";
@@ -383,7 +386,7 @@ export function createTaskViewer(task, actionDefinitions) {
     infoRow("Категория", CATEGORY_LABELS[task.category]),
     infoRow("Статус", task.status === "completed" ? "Выполнена" : task.status === "cancelled" ? "Отменена" : "Активна"),
     ...(task.recurrence ? [infoRow("Повторение", recurrenceDescription(task.recurrence))] : []),
-    ...(task.googleSync ? [infoRow("Google", task.googleSync.syncStatus === "synced" ? "Синхронизирована" : task.googleSync.lastErrorMessage || "Ожидает синхронизации")] : []),
+    ...(task.googleSync ? [infoRow("Google", task.googleSync.syncStatus === "synced" ? "Синхронизирована" : task.googleSync.syncStatus === "readOnlyRemote" ? "Связь завершена" : task.googleSync.lastErrorMessage || "Ожидает синхронизации")] : []),
   );
   view.append(list);
   if (task.tags.length) view.append(node("p", "task-view__tags", task.tags.map((tag) => `#${tag}`).join("  ")));
@@ -505,7 +508,10 @@ export function createNoteForm({ note = null, onSave }) {
     submit.disabled = true;
     try { await onSave(validation.normalized); form.dataset.dirty = "false"; }
     catch (error) {
-      actions.prepend(node("div", "form-error", error.name === "VersionError" ? "Заметка уже изменена в другой вкладке." : "Не удалось сохранить заметку. Данные остались в форме."));
+      const copy = error.name === "VersionError" ? "Заметка уже изменена в другой вкладке."
+        : error.name === "QuotaExceededError" ? "В хранилище браузера закончилось место. Экспортируйте данные и очистите корзину."
+        : "Не удалось сохранить заметку. Данные остались в форме.";
+      actions.prepend(node("div", "form-error", copy));
     } finally { form.dataset.saving = "false"; updateSaveState(); }
   });
   updateSaveState();

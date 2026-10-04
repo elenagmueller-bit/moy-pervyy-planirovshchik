@@ -350,6 +350,11 @@ kbd { border: 1px solid var(--line-strong); border-radius: 5px; padding: 1px 5px
 .google-result-card { min-height: 120px; }
 .google-event-view > .button { width: fit-content; text-decoration: none; }
 .google-status.is-connected .status-dot { background: #47745a; }
+.google-status.is-offline { color: #8f4d41; }
+.google-status.is-offline .status-dot { background: #8f4d41; }
+.google-cache-age,
+.google-queue-status { margin: 8px 0; color: var(--muted); font-size: 12px; }
+.google-queue-status { color: #78662b; font-weight: 700; }
 
 .note-group > h2 { margin: 4px 26px 10px; color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
 .note-grid { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 12px; padding: 0 26px 24px; }
@@ -365,6 +370,11 @@ kbd { border: 1px solid var(--line-strong); border-radius: 5px; padding: 1px 5px
 .note-card .task-badges { justify-content: flex-start; }
 .note-card .task-card__actions { padding-left: 0; }
 .search-options { display: flex; gap: 18px; margin: 0 26px 20px; }
+.load-more { justify-self: center; margin: 18px auto 4px; }
+.first-run-hint { margin: 0 24px 14px; padding: 11px 14px; border: 1px solid rgba(139,110,53,.3); border-radius: 10px; background: rgba(232,225,213,.55); color: var(--ink); font-size: 12px; }
+.calendar-source-toggle { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 8px; cursor: pointer; }
+.calendar-source-toggle input { margin: 0; }
+.calendar-source-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .danger-acknowledge { display: flex; align-items: flex-start; gap: 9px; margin-top: 14px; padding: 12px; border-radius: 9px; background: rgba(143,77,65,.09); font-size: 12px; line-height: 1.4; }
 
 .task-form { display: grid; gap: 15px; padding-bottom: 30px; }

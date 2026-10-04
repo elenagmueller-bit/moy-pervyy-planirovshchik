@@ -1,8 +1,8 @@
 export const APP_NAME = "Мой планировщик";
-export const APP_VERSION = "0.6.0";
+export const APP_VERSION = "0.8.0";
 export const DB_NAME = "personal-planner";
 export const DB_VERSION = 2;
-export const CACHE_VERSION = "planner-shell-v14";
+export const CACHE_VERSION = "planner-shell-v16";
 export const DEFAULT_ROUTE = "calendar";
 export const VALID_ROUTES = Object.freeze([
   "today",
@@ -36,6 +36,8 @@ export const LIMITS = Object.freeze({
   durationMax: 1_440,
   trashRetentionDays: 30,
   trashCleanupIntervalHours: 24,
+  listPageSize: 100,
+  storageWarningRatio: 0.8,
 });
 
 export const STORAGE_KEYS = Object.freeze({
