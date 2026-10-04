@@ -2,7 +2,7 @@ export const APP_NAME = "Мой планировщик";
 export const APP_VERSION = "0.4.1";
 export const DB_NAME = "personal-planner";
 export const DB_VERSION = 2;
-export const CACHE_VERSION = "planner-shell-v7";
+export const CACHE_VERSION = "planner-shell-v8";
 export const DEFAULT_ROUTE = "calendar";
 export const VALID_ROUTES = Object.freeze([
   "today",
