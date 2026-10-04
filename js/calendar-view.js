@@ -1,4 +1,5 @@
-import { combineLocalDateTime, formatLocalDate, getWeekDates, todayString } from "./date-utils.js";
+import { CALENDAR_TIME_ZONES } from "./config.js";
+import { combineLocalDateTime, convertWallTime, dateStringInZone, formatLocalDate, getWeekDates } from "./date-utils.js";
 
 export const CALENDAR_START_MINUTES = 6 * 60;
 export const CALENDAR_END_MINUTES = 23 * 60;
@@ -214,11 +215,22 @@ function renderAllDay(dates, grouped, callbacks, tasksById) {
   return row;
 }
 
-function renderTimeBody(dates, timedByDate, callbacks, tasksById, now) {
+function zoneAxisLabel(dateValue, timeValue, timeZone) {
+  const converted = convertWallTime(dateValue, timeValue, CALENDAR_TIME_ZONES.primary.id, timeZone.id);
+  const dayMark = converted.dayOffset === 1 ? " +1" : converted.dayOffset === -1 ? " −1" : "";
+  return `${converted.time}${dayMark}`;
+}
+
+function renderTimeBody(dates, timedByDate, callbacks, tasksById, now, secondaryTimeZone) {
   const body = element("div", "calendar-time-body");
   const axis = element("div", "calendar-time-axis");
+  const axisDate = formatLocalDate(dates[Math.min(3, dates.length - 1)]);
   for (let hour = 6; hour <= 23; hour += 1) {
-    const label = element("span", "", `${String(hour).padStart(2, "0")}:00`);
+    const label = element("span", "calendar-time-label");
+    label.append(
+      element("strong", "", `${String(hour).padStart(2, "0")}:00`),
+      element("small", "", zoneAxisLabel(axisDate, `${String(hour).padStart(2, "0")}:00`, secondaryTimeZone)),
+    );
     label.style.top = `${(hour * 60 - CALENDAR_START_MINUTES) / SLOT_MINUTES * SLOT_HEIGHT}px`;
     axis.append(label);
   }
@@ -237,7 +249,8 @@ function renderTimeBody(dates, timedByDate, callbacks, tasksById, now) {
 
   dates.forEach((date) => {
     const dateValue = formatLocalDate(date);
-    const column = element("div", `calendar-day-column${dateValue === todayString(now) ? " is-today" : ""}`);
+    const moscowToday = dateStringInZone(now, CALENDAR_TIME_ZONES.primary.id);
+    const column = element("div", `calendar-day-column${dateValue === moscowToday ? " is-today" : ""}`);
     column.dataset.calendarDate = dateValue;
     const slots = element("div", "calendar-slots");
     const slotCount = (CALENDAR_END_MINUTES - CALENDAR_START_MINUTES) / SLOT_MINUTES;
@@ -284,8 +297,9 @@ function renderTimeBody(dates, timedByDate, callbacks, tasksById, now) {
       chip.style.width = `calc(${100 / columns}% - 4px)`;
       column.append(chip);
     });
-    if (dateValue === todayString(now)) {
-      const minutes = now.getHours() * 60 + now.getMinutes();
+    if (dateValue === moscowToday) {
+      const moscowTime = new Intl.DateTimeFormat("en-GB", { timeZone: CALENDAR_TIME_ZONES.primary.id, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now);
+      const minutes = timeToMinutes(moscowTime);
       if (minutes >= CALENDAR_START_MINUTES && minutes <= CALENDAR_END_MINUTES) {
         const line = element("div", "current-time-line");
         line.style.top = `${(minutes - CALENDAR_START_MINUTES) / SLOT_MINUTES * SLOT_HEIGHT}px`;
@@ -309,6 +323,8 @@ export function renderWeekCalendar(visibleWeek, options = {}) {
   const tasks = (options.tasks || []).filter((task) => !task.archivedAt && !task.trashedAt && task.status !== "cancelled");
   const callbacks = { onCreate: options.onCreate, onOpen: options.onOpen, onMove: options.onMove, onResize: options.onResize };
   const now = options.now || new Date();
+  const secondaryTimeZone = CALENDAR_TIME_ZONES.secondary.find((zone) => zone.id === options.secondaryTimeZone) || CALENDAR_TIME_ZONES.secondary[0];
+  const moscowToday = dateStringInZone(now, CALENDAR_TIME_ZONES.primary.id);
   const dates = getWeekDates(visibleWeek);
   const dateSet = new Set(dates.map(formatLocalDate));
   const weekTasks = tasks.filter((task) => dateSet.has(task.date));
@@ -332,14 +348,31 @@ export function renderWeekCalendar(visibleWeek, options = {}) {
   const heading = element("header", "page-heading");
   const headingCopy = document.createElement("div");
   headingCopy.append(element("h1", "", "Календарь"), element("p", "", "Нажмите или выделите время, чтобы создать задачу"));
-  heading.append(headingCopy, element("span", "eyebrow", "Шаг 15 минут · локальное время"));
+  const zoneControl = element("label", "calendar-timezone-control");
+  zoneControl.append(element("span", "", "Дополнительная шкала"));
+  const zoneSelect = document.createElement("select");
+  zoneSelect.setAttribute("aria-label", "Дополнительная часовая шкала");
+  CALENDAR_TIME_ZONES.secondary.forEach((zone) => {
+    const option = document.createElement("option");
+    option.value = zone.id;
+    option.textContent = zone.label;
+    option.selected = zone.id === secondaryTimeZone.id;
+    zoneSelect.append(option);
+  });
+  zoneSelect.addEventListener("change", () => options.onSecondaryTimeZoneChange?.(zoneSelect.value));
+  zoneControl.append(zoneSelect);
+  const headingActions = element("div", "calendar-heading-actions");
+  headingActions.append(element("span", "eyebrow", "Основное время · Москва"), zoneControl);
+  heading.append(headingCopy, headingActions);
   card.append(heading);
 
   const header = element("div", "calendar-week-header");
-  header.append(element("div", "calendar-header-corner"));
+  const corner = element("div", "calendar-header-corner");
+  corner.append(element("strong", "", "Москва"), element("small", "", secondaryTimeZone.label));
+  header.append(corner);
   dates.forEach((date, index) => {
     const dateValue = formatLocalDate(date);
-    const day = element("div", `week-day${dateValue === todayString(now) ? " is-today" : ""}`);
+    const day = element("div", `week-day${dateValue === moscowToday ? " is-today" : ""}`);
     day.setAttribute("role", "columnheader");
     day.append(element("span", "week-day__name", WEEKDAY_NAMES[index]), element("span", "week-day__number", String(date.getDate())));
     header.append(day);
@@ -351,7 +384,7 @@ export function renderWeekCalendar(visibleWeek, options = {}) {
     header,
     renderCompactRegion("Раньше 06:00", dates, early, callbacks, tasksById),
     renderAllDay(dates, allDay, callbacks, tasksById),
-    renderTimeBody(dates, timed, callbacks, tasksById, now),
+    renderTimeBody(dates, timed, callbacks, tasksById, now, secondaryTimeZone),
     renderCompactRegion("Позже 23:00", dates, late, callbacks, tasksById),
   );
   window.requestAnimationFrame(() => { scroll.scrollTop = Number(options.scrollTop) || 0; });

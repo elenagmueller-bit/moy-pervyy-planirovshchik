@@ -9,6 +9,7 @@ import {
   renderWeekCalendar,
   timeToMinutes,
 } from "../js/calendar-view.js";
+import { convertWallTime, wallTimeToInstant } from "../js/date-utils.js";
 
 const results = [];
 const list = document.querySelector("[data-results]");
@@ -53,6 +54,13 @@ await check("Преобразование времени и границы дл�
   assert(durationFromResize(1_440, 500) === 1_440);
 });
 
+await check("Москва — основная шкала, Самара и Швейцария пересчитываются", () => {
+  assert(convertWallTime("2026-01-15", "12:00", "Europe/Moscow", "Europe/Samara").time === "13:00");
+  assert(convertWallTime("2026-07-15", "12:00", "Europe/Moscow", "Europe/Samara").time === "13:00");
+  assert(convertWallTime("2026-01-15", "12:00", "Europe/Moscow", "Europe/Zurich").time === "10:00");
+  assert(convertWallTime("2026-07-15", "12:00", "Europe/Moscow", "Europe/Zurich").time === "11:00");
+});
+
 await check("Пересечения учитывают соседний день", () => {
   const first = task({ id: "first", date: "2026-08-31", startTime: "23:30", durationMinutes: 60 });
   const second = task({ id: "second", date: "2026-09-01", startTime: "00:00", durationMinutes: 15 });
@@ -90,9 +98,12 @@ let created = null;
 let moved = null;
 let resized = null;
 let scrollValue = null;
+let selectedZone = null;
 const calendar = renderWeekCalendar("2026-08-31", {
   tasks: sampleTasks,
-  now: new Date(2026, 7, 31, 10, 30),
+  now: wallTimeToInstant("2026-08-31", "10:30", "Europe/Moscow"),
+  secondaryTimeZone: "Europe/Zurich",
+  onSecondaryTimeZoneChange: (value) => { selectedZone = value; },
   onCreate: (value) => { created = value; },
   onMove: (value, patch) => { moved = { value, patch }; },
   onResize: (value, durationMinutes) => { resized = { value, durationMinutes }; },
@@ -109,6 +120,18 @@ await check("Неделя содержит 7 дней и 68 четвертей �
   assert(calendar.querySelector(".calendar-slot").dataset.time === "06:00");
   assert(calendar.querySelectorAll(".calendar-slot")[67].dataset.time === "22:45");
   assert(CALENDAR_START_MINUTES === 360 && CALENDAR_END_MINUTES === 1_380);
+});
+
+await check("В календаре видны Москва и выбранная дополнительная шкала", () => {
+  assert(calendar.querySelector(".calendar-header-corner").textContent === "МоскваШвейцария");
+  assert(calendar.querySelector("[aria-label='Дополнительная часовая шкала']").value === "Europe/Zurich");
+  const firstLabel = calendar.querySelector(".calendar-time-label");
+  assert(firstLabel.querySelector("strong").textContent === "06:00");
+  assert(firstLabel.querySelector("small").textContent === "05:00");
+  const selector = calendar.querySelector("[aria-label='Дополнительная часовая шкала']");
+  selector.value = "Europe/Samara";
+  selector.dispatchEvent(new Event("change", { bubbles: true }));
+  assert(selectedZone === "Europe/Samara");
 });
 
 await check("Задачи всех временных типов остаются в DOM", () => {

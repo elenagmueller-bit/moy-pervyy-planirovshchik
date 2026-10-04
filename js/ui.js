@@ -1,5 +1,5 @@
-import { STORAGE_KEYS } from "./config.js";
-import { addCalendarDays, combineLocalDateTime, endOfISOWeek, formatLocalDate, formatPeriodLabel, getISOWeek, getSystemTimeZone, monthMatrix, startOfISOWeek, todayString } from "./date-utils.js";
+import { CALENDAR_TIME_ZONES, STORAGE_KEYS } from "./config.js";
+import { addCalendarDays, combineLocalDateTime, dateStringInZone, endOfISOWeek, formatLocalDate, formatPeriodLabel, getISOWeek, getSystemTimeZone, monthMatrix, startOfISOWeek, wallClockDateInZone } from "./date-utils.js";
 import { createTaskForm, createTaskViewer } from "./forms.js";
 import { filterTasks, isTaskOverdue, sortTasks, taskDeletionDate } from "./repositories.js";
 import { findTaskConflicts, renderWeekCalendar } from "./calendar-view.js";
@@ -216,6 +216,7 @@ export function createUI({ state, router, repositories }) {
   let filters = {};
   let taskSort = "date";
   let panelContext = null;
+  let secondaryTimeZone = localStorage.getItem(STORAGE_KEYS.secondaryTimeZone) || "Europe/Samara";
 
   function showToast(message, kind = "neutral") {
     window.clearTimeout(toastTimer);
@@ -261,7 +262,7 @@ export function createUI({ state, router, repositories }) {
       control.dataset.date = dateValue;
       control.setAttribute("aria-label", date.toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long", year: "numeric" }));
       if (date.getMonth() !== focusDate.getMonth()) control.classList.add("is-outside");
-      if (dateValue === todayString()) control.classList.add("is-today");
+      if (dateValue === dateStringInZone(new Date(), CALENDAR_TIME_ZONES.primary.id)) control.classList.add("is-today");
       if (dateValue === formatLocalDate(currentState.selectedDate)) control.classList.add("is-selected");
       control.addEventListener("click", () => {
         state.set({ selectedDate: date, visibleWeek: date, miniCalendarDate: date });
@@ -290,14 +291,21 @@ export function createUI({ state, router, repositories }) {
     card.append(pageHeader(route));
     if (route === "settings") {
       const settings = element("div", "settings-card");
-      settings.append(element("h2", "", "Время устройства"), element("p", "", `Используется время устройства: ${getSystemTimeZone()}`), element("p", "", "Подключение Google и управление резервными копиями появятся на следующих этапах."));
+      const selectedZone = CALENDAR_TIME_ZONES.secondary.find((zone) => zone.id === secondaryTimeZone) || CALENDAR_TIME_ZONES.secondary[0];
+      settings.append(
+        element("h2", "", "Часовые шкалы"),
+        element("p", "", "Основная шкала: Москва"),
+        element("p", "", `Дополнительная шкала: ${selectedZone.label}`),
+        element("p", "", `Время устройства: ${getSystemTimeZone()}`),
+        element("p", "", "Дополнительная шкала переключается в календаре. Подключение Google и управление резервными копиями появятся на следующих этапах."),
+      );
       card.append(settings);
     } else card.append(emptyState(route));
     return card;
   }
 
   function renderTaskRoute(route) {
-    const now = new Date();
+    const now = wallClockDateInZone(new Date(), CALENDAR_TIME_ZONES.primary.id);
     const visible = sortTasks(filterTasks(tasks, route, filters, now), taskSort);
     const card = element("section", "page-card");
     card.dataset.view = route;
@@ -340,6 +348,12 @@ export function createUI({ state, router, repositories }) {
         onOpen: openTaskViewer,
         onMove: moveCalendarTask,
         onResize: resizeCalendarTask,
+        secondaryTimeZone,
+        onSecondaryTimeZoneChange: (value) => {
+          secondaryTimeZone = value;
+          localStorage.setItem(STORAGE_KEYS.secondaryTimeZone, value);
+          renderRoute(state.get());
+        },
         scrollTop: Number(localStorage.getItem(STORAGE_KEYS.calendarScroll)) || 0,
         onScroll: (scrollTop) => localStorage.setItem(STORAGE_KEYS.calendarScroll, String(Math.round(scrollTop))),
       })
@@ -354,8 +368,9 @@ export function createUI({ state, router, repositories }) {
 
   async function refreshTasks({ render = true } = {}) {
     const current = state.get();
-    const start = current.route === "calendar" ? formatLocalDate(startOfISOWeek(current.visibleWeek)) : addCalendarDays(todayString(), -730);
-    const end = current.route === "calendar" ? formatLocalDate(endOfISOWeek(current.visibleWeek)) : addCalendarDays(todayString(), 730);
+    const primaryToday = dateStringInZone(new Date(), CALENDAR_TIME_ZONES.primary.id);
+    const start = current.route === "calendar" ? formatLocalDate(startOfISOWeek(current.visibleWeek)) : addCalendarDays(primaryToday, -730);
+    const end = current.route === "calendar" ? formatLocalDate(endOfISOWeek(current.visibleWeek)) : addCalendarDays(primaryToday, 730);
     tasks = await repositories.recurrence.listRange(start, end, { includeSeriesRepresentatives: ["archive", "trash"].includes(current.route) });
     if (render) renderRoute(state.get());
   }
@@ -590,7 +605,7 @@ export function createUI({ state, router, repositories }) {
   }
 
   function goToday() {
-    const today = new Date();
+    const today = wallClockDateInZone(new Date(), CALENDAR_TIME_ZONES.primary.id);
     state.set({ visibleWeek: today, selectedDate: today, miniCalendarDate: today });
     router.navigate("calendar");
   }
@@ -656,7 +671,8 @@ export function createUI({ state, router, repositories }) {
       }
       if (taskAction.dataset.taskAction === "overdue-bulk-today") {
         const ids = [...panelBody.querySelectorAll("[data-task-id]:has(input:checked)")].map((item) => item.dataset.taskId);
-        await Promise.all(ids.map((id) => repositories.tasks.update(id, { date: todayString() })));
+        const primaryToday = dateStringInZone(new Date(), CALENDAR_TIME_ZONES.primary.id);
+        await Promise.all(ids.map((id) => repositories.tasks.update(id, { date: primaryToday })));
         await refreshTasks();
         closePanelImmediately();
         showToast("Выбранные задачи перенесены на сегодня");

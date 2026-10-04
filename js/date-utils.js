@@ -90,6 +90,62 @@ export function getSystemTimeZone() {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "Локальное время";
 }
 
+export function dateTimePartsInZone(instant, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(instant);
+  const values = Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
+  return { year: values.year, month: values.month, day: values.day, hour: values.hour, minute: values.minute, second: values.second };
+}
+
+export function dateStringInZone(instant, timeZone) {
+  const parts = dateTimePartsInZone(instant, timeZone);
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
+}
+
+export function wallClockDateInZone(instant, timeZone) {
+  const parts = dateTimePartsInZone(instant, timeZone);
+  return new Date(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+}
+
+export function timeZoneOffsetMinutes(instant, timeZone) {
+  const parts = dateTimePartsInZone(instant, timeZone);
+  const representedAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return Math.round((representedAsUtc - instant.getTime()) / 60_000);
+}
+
+export function wallTimeToInstant(dateValue, timeValue, timeZone) {
+  if (!isValidDateString(dateValue) || !isValidTimeString(timeValue)) throw new TypeError("Некорректная локальная дата или время");
+  const [year, month, day] = dateValue.split("-").map(Number);
+  const [hour, minute] = timeValue.split(":").map(Number);
+  const wallAsUtc = Date.UTC(year, month - 1, day, hour, minute);
+  let instant = new Date(wallAsUtc);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const next = new Date(wallAsUtc - timeZoneOffsetMinutes(instant, timeZone) * 60_000);
+    if (next.getTime() === instant.getTime()) break;
+    instant = next;
+  }
+  return instant;
+}
+
+export function convertWallTime(dateValue, timeValue, fromTimeZone, toTimeZone) {
+  const instant = wallTimeToInstant(dateValue, timeValue, fromTimeZone);
+  const parts = dateTimePartsInZone(instant, toTimeZone);
+  const targetDate = `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
+  return {
+    date: targetDate,
+    time: `${pad(parts.hour)}:${pad(parts.minute)}`,
+    dayOffset: Math.round((parseLocalDate(targetDate).getTime() - parseLocalDate(dateValue).getTime()) / 86_400_000),
+  };
+}
+
 export function formatPeriodLabel(value, locale = "ru-RU") {
   const [start, , , , , , end] = getWeekDates(value);
   const monthName = (date) => new Intl.DateTimeFormat(locale, { day: "numeric", month: "long" })
