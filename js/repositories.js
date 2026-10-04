@@ -1,6 +1,6 @@
 import { LIMITS } from "./config.js";
 import { combineLocalDateTime, todayString, toUtcTimestamp } from "./date-utils.js";
-import { createTask, updateTaskRecord } from "./models.js";
+import { createNote, createTask, updateNoteRecord, updateTaskRecord } from "./models.js?v=0.6.0";
 import { requestToPromise, runTransaction } from "./db.js";
 import { createSeriesRecord, expandSeries, previousOccurrenceDate, seriesRepresentative, splitSeriesRecords, updateWholeSeries } from "./recurrence.js";
 
@@ -117,6 +117,89 @@ export class TaskRepository extends Repository {
       });
       meta.put({ key: "taskTrashCleanup", value: toUtcTimestamp(now) });
       return { skipped: false, deleted: expired.length + expiredSeries.length };
+    });
+  }
+}
+
+export class NoteRepository extends Repository {
+  constructor(database) {
+    super(database, "notes");
+  }
+
+  create(input, now = new Date()) {
+    const note = createNote(input, now);
+    return runTransaction(this.database, "notes", "readwrite", ({ notes }) => requestToPromise(notes.add(note))).then(() => note);
+  }
+
+  update(id, patch, { now = new Date(), expectedRevision } = {}) {
+    return runTransaction(this.database, "notes", "readwrite", async ({ notes }) => {
+      const current = await requestToPromise(notes.get(id));
+      if (!current) throw new DOMException("Заметка не найдена", "NotFoundError");
+      if (Number.isInteger(expectedRevision) && current.revision !== expectedRevision) throw new DOMException("Заметка уже изменена в другой вкладке", "VersionError");
+      const updated = updateNoteRecord(current, patch, now);
+      await requestToPromise(notes.put(updated));
+      return updated;
+    });
+  }
+
+  pin(id, isPinned, now = new Date()) { return this.update(id, { isPinned }, { now }); }
+  archive(id, now = new Date()) { return this.update(id, { archivedAt: toUtcTimestamp(now) }, { now }); }
+  restoreFromArchive(id, now = new Date()) { return this.update(id, { archivedAt: null }, { now }); }
+  moveToTrash(id, now = new Date()) { return this.update(id, { trashedAt: toUtcTimestamp(now) }, { now }); }
+  restoreFromTrash(id, now = new Date()) { return this.update(id, { trashedAt: null }, { now }); }
+
+  async deleteForever(id) {
+    const note = await this.get(id);
+    if (!note?.trashedAt) throw new DOMException("Окончательно удалить можно только из корзины", "InvalidStateError");
+    await this.delete(id);
+    return note;
+  }
+
+  convertToTask(noteId, taskInput, now = new Date()) {
+    return runTransaction(this.database, ["notes", "tasks"], "readwrite", async ({ notes, tasks }) => {
+      const note = await requestToPromise(notes.get(noteId));
+      if (!note) throw new DOMException("Заметка не найдена", "NotFoundError");
+      const task = createTask(taskInput, now);
+      await requestToPromise(tasks.add(task));
+      const archived = updateNoteRecord(note, { archivedAt: toUtcTimestamp(now) }, now);
+      await requestToPromise(notes.put(archived));
+      return { note: archived, task };
+    });
+  }
+
+  async cleanupExpiredTrash({ now = new Date(), force = false } = {}) {
+    const cutoff = now.getTime() - LIMITS.trashRetentionDays * DAY_MS;
+    const interval = LIMITS.trashCleanupIntervalHours * 3_600_000;
+    return runTransaction(this.database, ["notes", "meta"], "readwrite", async ({ notes, meta }) => {
+      const lastRun = await requestToPromise(meta.get("noteTrashCleanup"));
+      if (!force && lastRun?.value && now.getTime() - Date.parse(lastRun.value) < interval) return { skipped: true, deleted: 0 };
+      const all = await requestToPromise(notes.getAll());
+      const expired = all.filter((note) => note.trashedAt && Date.parse(note.trashedAt) <= cutoff);
+      expired.forEach((note) => notes.delete(note.id));
+      meta.put({ key: "noteTrashCleanup", value: toUtcTimestamp(now) });
+      return { skipped: false, deleted: expired.length };
+    });
+  }
+}
+
+export class GoogleIntegrationRepository {
+  constructor(database) { this.database = database; }
+
+  disconnect(now = new Date()) {
+    const timestamp = toUtcTimestamp(now);
+    return runTransaction(this.database, ["tasks", "series", "googleEventsCache", "syncState"], "readwrite", async ({ tasks, series, googleEventsCache, syncState }) => {
+      const taskRecords = await requestToPromise(tasks.getAll());
+      for (const task of taskRecords.filter((item) => item.googleSync)) {
+        const updated = updateTaskRecord(task, { googleSync: { ...task.googleSync, syncStatus: "error", lastErrorCode: "GOOGLE_DISCONNECTED", lastErrorMessage: "Google отключён", lastAttemptAt: timestamp } }, now);
+        await requestToPromise(tasks.put(updated));
+      }
+      const seriesRecords = await requestToPromise(series.getAll());
+      for (const record of seriesRecords.filter((item) => item.template?.googleSync)) {
+        await requestToPromise(series.put({ ...record, template: { ...record.template, googleSync: { ...record.template.googleSync, syncStatus: "error", lastErrorCode: "GOOGLE_DISCONNECTED", lastErrorMessage: "Google отключён", lastAttemptAt: timestamp } }, updatedAt: timestamp, revision: record.revision + 1 }));
+      }
+      await requestToPromise(googleEventsCache.clear());
+      await requestToPromise(syncState.clear());
+      return { tasks: taskRecords.filter((item) => item.googleSync).length, series: seriesRecords.filter((item) => item.template?.googleSync).length };
     });
   }
 }
@@ -315,17 +398,47 @@ export function sortTasks(tasks, sort = "date") {
   return values.sort(byDate);
 }
 
+export function filterNotes(notes, filters = {}, source = "active") {
+  return notes.filter((note) => {
+    if (source === "trash") return Boolean(note.trashedAt);
+    if (note.trashedAt) return false;
+    if (source === "archive") return Boolean(note.archivedAt);
+    if (note.archivedAt) return false;
+    if (filters.category && note.category !== filters.category) return false;
+    if (filters.priority && note.priority !== filters.priority) return false;
+    if (filters.pinned === "yes" && !note.isPinned) return false;
+    if (filters.pinned === "no" && note.isPinned) return false;
+    if (filters.createdFrom && note.createdAt.slice(0, 10) < filters.createdFrom) return false;
+    if (filters.createdTo && note.createdAt.slice(0, 10) > filters.createdTo) return false;
+    if (filters.tags) {
+      const wanted = filters.tags.toLocaleLowerCase("ru-RU").split(",").map((tag) => tag.trim()).filter(Boolean);
+      const actual = note.tags.map((tag) => tag.toLocaleLowerCase("ru-RU"));
+      if (!wanted.every((tag) => actual.includes(tag))) return false;
+    }
+    return true;
+  });
+}
+
+export function sortNotes(notes, sort = "created-new") {
+  const values = [...notes];
+  const tie = (a, b) => b.createdAt.localeCompare(a.createdAt);
+  if (sort === "priority") return values.sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] || tie(a, b));
+  if (sort === "updated") return values.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || tie(a, b));
+  return values.sort(tie);
+}
+
 export function createRepositories(database) {
   return Object.freeze({
     tasks: new TaskRepository(database),
     series: new Repository(database, "series"),
     recurrence: new RecurrenceRepository(database),
-    notes: new Repository(database, "notes"),
+    notes: new NoteRepository(database),
     googleCalendars: new Repository(database, "googleCalendars"),
     googleEventsCache: new Repository(database, "googleEventsCache"),
     syncState: new Repository(database, "syncState"),
     syncQueue: new Repository(database, "syncQueue"),
     conflictHistory: new Repository(database, "conflictHistory"),
+    googleIntegration: new GoogleIntegrationRepository(database),
     settings: new Repository(database, "settings"),
     meta: new Repository(database, "meta"),
   });

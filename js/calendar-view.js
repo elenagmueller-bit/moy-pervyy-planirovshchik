@@ -1,5 +1,5 @@
 import { CALENDAR_TIME_ZONES } from "./config.js";
-import { combineLocalDateTime, convertWallTime, dateStringInZone, formatLocalDate, getWeekDates } from "./date-utils.js";
+import { addCalendarDays, combineLocalDateTime, convertWallTime, dateStringInZone, formatLocalDate, getWeekDates } from "./date-utils.js";
 
 export const CALENDAR_START_MINUTES = 6 * 60;
 export const CALENDAR_END_MINUTES = 23 * 60;
@@ -140,6 +140,25 @@ function createTaskChip(task, { compact = false, onOpen, onMove, onResize } = {}
   return chip;
 }
 
+function createGoogleChip(event, { compact = false, onOpenGoogle } = {}) {
+  const chip = element("article", `calendar-google-event${compact ? " is-compact" : ""}`);
+  chip.dataset.googleEventKey = event.cacheKey;
+  chip.tabIndex = 0;
+  chip.setAttribute("role", "button");
+  chip.setAttribute("aria-label", `${event.title}. Google Calendar: ${event.calendarName}. ${taskTimeLabel(event)}`);
+  chip.style.setProperty("--google-color", event.calendarColor || "#bec8c8");
+  chip.append(element("strong", "", event.title), element("span", "", `${taskTimeLabel(event)} · ${event.calendarName}`));
+  chip.addEventListener("click", () => onOpenGoogle?.(event));
+  chip.addEventListener("keydown", (keyboardEvent) => {
+    if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") { keyboardEvent.preventDefault(); onOpenGoogle?.(event); }
+  });
+  return chip;
+}
+
+function createCalendarChip(item, options = {}) {
+  return item.isGoogleEvent ? createGoogleChip(item, options) : createTaskChip(item, options);
+}
+
 function makeDropTarget(node, patchForTask, tasksById, onMove) {
   node.addEventListener("dragover", (event) => {
     if (!event.dataTransfer.types.includes("text/plain")) return;
@@ -165,7 +184,7 @@ function renderCompactRegion(label, dates, grouped, callbacks, tasksById) {
   dates.forEach((date) => {
     const dateValue = formatLocalDate(date);
     const cell = element("div", "calendar-compact-cell");
-    (grouped.get(dateValue) || []).forEach((task) => cell.append(createTaskChip(task, { compact: true, ...callbacks })));
+    (grouped.get(dateValue) || []).forEach((task) => cell.append(createCalendarChip(task, { compact: true, ...callbacks })));
     row.append(cell);
   });
   details.append(summary, row);
@@ -183,7 +202,7 @@ function renderAllDay(dates, grouped, callbacks, tasksById) {
     cell.setAttribute("role", "button");
     cell.setAttribute("aria-label", `Создать задачу без времени на ${date.toLocaleDateString("ru-RU")}`);
     const values = grouped.get(dateValue) || [];
-    values.slice(0, 3).forEach((task) => cell.append(createTaskChip(task, { compact: true, ...callbacks })));
+    values.slice(0, 3).forEach((task) => cell.append(createCalendarChip(task, { compact: true, ...callbacks })));
     if (values.length > 3) {
       const more = element("button", "calendar-more", `Ещё ${values.length - 3}`);
       more.type = "button";
@@ -192,7 +211,7 @@ function renderAllDay(dates, grouped, callbacks, tasksById) {
         const expanded = more.dataset.expanded === "true";
         cell.querySelectorAll(".calendar-task:nth-of-type(n+4)").forEach((item) => { item.hidden = expanded; });
         if (!expanded && more.dataset.loaded !== "true") {
-          values.slice(3).forEach((task) => cell.insertBefore(createTaskChip(task, { compact: true, ...callbacks }), more));
+          values.slice(3).forEach((task) => cell.insertBefore(createCalendarChip(task, { compact: true, ...callbacks }), more));
           more.dataset.loaded = "true";
         }
         more.dataset.expanded = String(!expanded);
@@ -201,7 +220,7 @@ function renderAllDay(dates, grouped, callbacks, tasksById) {
       cell.append(more);
     }
     cell.addEventListener("click", (event) => {
-      if (!event.target.closest(".calendar-task, .calendar-more")) callbacks.onCreate?.({ date: dateValue, hasTime: false, startTime: null, durationMinutes: null });
+      if (!event.target.closest(".calendar-task, .calendar-google-event, .calendar-more")) callbacks.onCreate?.({ date: dateValue, hasTime: false, startTime: null, durationMinutes: null });
     });
     cell.addEventListener("keydown", (event) => {
       if ((event.key === "Enter" || event.key === " ") && event.target === cell) {
@@ -288,7 +307,7 @@ function renderTimeBody(dates, timedByDate, callbacks, tasksById, now, secondary
     }
     column.append(slots);
     layoutTimedTasks(timedByDate.get(dateValue) || []).forEach(({ task, start, end, column: overlapColumn, columns }) => {
-      const chip = createTaskChip(task, callbacks);
+      const chip = createCalendarChip(task, callbacks);
       const visibleStart = Math.max(start, CALENDAR_START_MINUTES);
       const visibleEnd = Math.min(end, CALENDAR_END_MINUTES);
       chip.style.top = `${(visibleStart - CALENDAR_START_MINUTES) / SLOT_MINUTES * SLOT_HEIGHT}px`;
@@ -321,13 +340,14 @@ function renderTimeBody(dates, timedByDate, callbacks, tasksById, now, secondary
 
 export function renderWeekCalendar(visibleWeek, options = {}) {
   const tasks = (options.tasks || []).filter((task) => !task.archivedAt && !task.trashedAt && task.status !== "cancelled");
-  const callbacks = { onCreate: options.onCreate, onOpen: options.onOpen, onMove: options.onMove, onResize: options.onResize };
+  const callbacks = { onCreate: options.onCreate, onOpen: options.onOpen, onOpenGoogle: options.onOpenGoogle, onMove: options.onMove, onResize: options.onResize };
   const now = options.now || new Date();
   const secondaryTimeZone = CALENDAR_TIME_ZONES.secondary.find((zone) => zone.id === options.secondaryTimeZone) || CALENDAR_TIME_ZONES.secondary[0];
   const moscowToday = dateStringInZone(now, CALENDAR_TIME_ZONES.primary.id);
   const dates = getWeekDates(visibleWeek);
   const dateSet = new Set(dates.map(formatLocalDate));
   const weekTasks = tasks.filter((task) => dateSet.has(task.date));
+  const googleEvents = (options.googleEvents || []).filter((event) => event.status !== "cancelled");
   const tasksById = new Map(weekTasks.map((task) => [task.id, task]));
   const allDay = new Map();
   const early = new Map();
@@ -341,6 +361,24 @@ export function renderWeekCalendar(visibleWeek, options = {}) {
     }
     if (!target.has(task.date)) target.set(task.date, []);
     target.get(task.date).push(task);
+  });
+  googleEvents.forEach((event) => {
+    if (!event.hasTime) {
+      let date = event.date;
+      while (date < event.endDate) {
+        if (dateSet.has(date)) {
+          if (!allDay.has(date)) allDay.set(date, []);
+          allDay.get(date).push({ ...event, date });
+        }
+        date = addCalendarDays(date, 1);
+      }
+      return;
+    }
+    if (!dateSet.has(event.date)) return;
+    const start = timeToMinutes(event.startTime);
+    const target = start < CALENDAR_START_MINUTES ? early : start >= CALENDAR_END_MINUTES ? late : timed;
+    if (!target.has(event.date)) target.set(event.date, []);
+    target.get(event.date).push(event);
   });
 
   const card = element("section", "page-card calendar-card");

@@ -1,9 +1,11 @@
 import { DEFAULT_ROUTE, STORAGE_KEYS } from "./config.js";
 import { openPlannerDatabase } from "./db.js";
-import { createRepositories } from "./repositories.js";
+import { createRepositories } from "./repositories.js?v=0.6.0";
 import { createRouter, routeFromHash } from "./router.js";
 import { createAppState } from "./state.js";
-import { createUI } from "./ui.js";
+import { createUI } from "./ui.js?v=0.6.0";
+import { createGoogleAuthService } from "./google-auth.js?v=0.6.0";
+import { createGoogleCalendarService } from "./google-calendar.js?v=0.6.0";
 
 function readBoolean(key) {
   return localStorage.getItem(key) === "true";
@@ -23,7 +25,9 @@ async function start() {
     sidebarCollapsed: readBoolean(STORAGE_KEYS.sidebarCollapsed),
   });
   const router = createRouter(state);
-  const ui = createUI({ state, router, repositories });
+  const googleAuth = createGoogleAuthService();
+  const googleCalendar = createGoogleCalendarService({ auth: googleAuth });
+  const ui = createUI({ state, router, repositories, googleAuth, googleCalendar });
 
   window.addEventListener("online", () => state.set({ online: true }));
   window.addEventListener("offline", () => state.set({ online: false }));
@@ -33,9 +37,10 @@ async function start() {
     }
   });
 
-  const cleanup = await repositories.tasks.cleanupExpiredTrash();
+  const [cleanup, noteCleanup] = await Promise.all([repositories.tasks.cleanupExpiredTrash(), repositories.notes.cleanupExpiredTrash()]);
   await ui.mount();
   if (cleanup.deleted) ui.showToast(`Из корзины удалено устаревших задач: ${cleanup.deleted}`);
+  if (noteCleanup.deleted) ui.showToast(`Из корзины удалено устаревших заметок: ${noteCleanup.deleted}`);
   state.set({ ready: true });
   if (!window.location.hash) router.navigate(state.get().route, { replace: true });
 
@@ -51,6 +56,7 @@ async function start() {
     storeNames: Array.from(database.objectStoreNames),
     route: () => state.get().route,
     taskCount: () => repositories.tasks.getAll().then((tasks) => tasks.length),
+    noteCount: () => repositories.notes.getAll().then((notes) => notes.length),
   });
 }
 

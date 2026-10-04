@@ -1,5 +1,5 @@
 import { LIMITS } from "./config.js";
-import { validateTask } from "./models.js";
+import { validateNote, validateTask } from "./models.js?v=0.6.0";
 
 const PRIORITY_LABELS = Object.freeze({ high: "Высокий", medium: "Средний", low: "Низкий" });
 const CATEGORY_LABELS = Object.freeze({ work: "Работа", personal: "Личное" });
@@ -135,6 +135,8 @@ export function taskInputFromForm(form, existing = null) {
       count: Number(data.get("recurrenceCount") || 1),
     },
     googleSync: existing?.googleSync || null,
+    googleEnabled: data.get("google") === "on",
+    googleCalendarId: data.get("googleCalendarId") || existing?.googleSync?.calendarId || null,
   };
 }
 
@@ -154,7 +156,7 @@ function showErrors(form, errors) {
   });
 }
 
-export function createTaskForm({ task = null, defaults = null, onSave }) {
+export function createTaskForm({ task = null, defaults = null, onSave, google: googleOptions = {} }) {
   const form = node("form", "task-form");
   form.noValidate = true;
   form.dataset.dirty = "false";
@@ -225,10 +227,36 @@ export function createTaskForm({ task = null, defaults = null, onSave }) {
   const linksError = node("small", "form-field__error");
   linksError.dataset.errorFor = "links";
 
-  const googleSwitch = node("label", "switch-row is-disabled");
-  const google = input("google", "checkbox", false);
-  google.disabled = true;
-  googleSwitch.append(google, node("span", "", "Добавить в Google Calendar"), node("small", "", "Станет доступно после подключения Google"));
+  const googleSwitch = node("label", "switch-row");
+  const google = input("google", "checkbox", Boolean(initial.googleSync || initial.googleEnabled));
+  const googleHint = node("small", "", googleOptions.connected ? "Напоминание работает через Google Calendar за 10 минут" : "При включении потребуется подключить Google");
+  googleSwitch.append(google, node("span", "", "Добавить в Google Calendar"), googleHint);
+  const googleCalendar = select("googleCalendarId", [], initial.googleSync?.calendarId || googleOptions.defaultCalendarId || "");
+  const googleCalendarField = field("Календарь для задачи", googleCalendar);
+  function setWritableCalendars(calendars = googleOptions.calendars || []) {
+    googleCalendar.replaceChildren();
+    calendars.filter((calendar) => ["writer", "owner"].includes(calendar.accessRole)).forEach((calendar) => {
+      const option = document.createElement("option"); option.value = calendar.id; option.textContent = calendar.summary; googleCalendar.append(option);
+    });
+    const preferred = initial.googleSync?.calendarId || googleOptions.defaultCalendarId;
+    if (preferred && [...googleCalendar.options].some((option) => option.value === preferred)) googleCalendar.value = preferred;
+    googleCalendarField.hidden = !google.checked;
+  }
+  google.addEventListener("change", async () => {
+    if (google.checked && !googleOptions.connected && googleOptions.onRequestAccess) {
+      google.disabled = true;
+      try {
+        const result = await googleOptions.onRequestAccess();
+        googleOptions = { ...googleOptions, ...result, connected: Boolean(result?.connected) };
+        if (!googleOptions.connected) google.checked = false;
+        else { setWritableCalendars(googleOptions.calendars); googleHint.textContent = "Напоминание работает через Google Calendar за 10 минут"; }
+      } catch { google.checked = false; }
+      finally { google.disabled = false; }
+    }
+    googleCalendarField.hidden = !google.checked;
+    form.dataset.dirty = "true";
+    form.dispatchEvent(new Event("input", { bubbles: true }));
+  });
   const rule = initial.recurrence || null;
   const recurrence = select("recurrenceFrequency", [
     ["none", "Не повторяется"], ["daily", "Каждый день"], ["weekly", "Каждую неделю"],
@@ -292,13 +320,14 @@ export function createTaskForm({ task = null, defaults = null, onSave }) {
   checklistGroup.append(node("h3", "", "Чек-лист"), checklist, addChecklist, checklistError);
   const linksGroup = node("section", "form-group");
   linksGroup.append(node("h3", "", "Ссылки"), links, addLink, linksError);
-  form.append(checklistGroup, linksGroup, recurrenceGroup, googleSwitch, actions);
+  form.append(checklistGroup, linksGroup, recurrenceGroup, googleSwitch, googleCalendarField, actions);
+  setWritableCalendars();
   updateTimeVisibility();
   updateRecurrenceVisibility();
 
   const updateSaveState = () => {
     const candidate = taskInputFromForm(form, task);
-    submit.disabled = !validateTask(candidate).valid || form.dataset.saving === "true";
+    submit.disabled = !validateTask(candidate).valid || (candidate.googleEnabled && !candidate.googleCalendarId) || form.dataset.saving === "true";
   };
   form.addEventListener("input", () => { form.dataset.dirty = "true"; updateSaveState(); });
   form.addEventListener("change", () => { form.dataset.dirty = "true"; updateSaveState(); });
@@ -307,6 +336,8 @@ export function createTaskForm({ task = null, defaults = null, onSave }) {
     if (form.dataset.saving === "true") return;
     const candidate = taskInputFromForm(form, task);
     const validation = validateTask(candidate);
+    if (candidate.googleEnabled && !candidate.googleCalendarId) validation.errors.googleCalendarId = "Выберите календарь с правом записи";
+    validation.valid = Object.keys(validation.errors).length === 0;
     if (!validation.valid) {
       showErrors(form, validation.errors);
       form.querySelector("[aria-invalid='true']")?.focus();
@@ -317,7 +348,7 @@ export function createTaskForm({ task = null, defaults = null, onSave }) {
     submit.disabled = true;
     submit.textContent = "Сохраняем…";
     try {
-      const saved = await onSave(validation.normalized);
+      const saved = await onSave({ ...candidate, ...validation.normalized });
       if (saved === false) return;
       form.dataset.dirty = "false";
     } catch (error) {
@@ -352,6 +383,7 @@ export function createTaskViewer(task, actionDefinitions) {
     infoRow("Категория", CATEGORY_LABELS[task.category]),
     infoRow("Статус", task.status === "completed" ? "Выполнена" : task.status === "cancelled" ? "Отменена" : "Активна"),
     ...(task.recurrence ? [infoRow("Повторение", recurrenceDescription(task.recurrence))] : []),
+    ...(task.googleSync ? [infoRow("Google", task.googleSync.syncStatus === "synced" ? "Синхронизирована" : task.googleSync.lastErrorMessage || "Ожидает синхронизации")] : []),
   );
   view.append(list);
   if (task.tags.length) view.append(node("p", "task-view__tags", task.tags.map((tag) => `#${tag}`).join("  ")));
@@ -396,6 +428,125 @@ export function recurrenceDescription(rule) {
   return frequency;
 }
 
+export function noteInputFromForm(form, existing = null) {
+  const data = new FormData(form);
+  const rows = collectRows(form);
+  return {
+    ...(existing || {}),
+    title: data.get("title"),
+    text: data.get("text"),
+    category: data.get("category"),
+    priority: data.get("priority") || "medium",
+    isPinned: data.get("isPinned") === "on",
+    tags: parseTags(data.get("tags") || ""),
+    links: rows.links,
+  };
+}
+
+export function createNoteForm({ note = null, onSave }) {
+  const form = node("form", "task-form note-form");
+  form.noValidate = true;
+  form.dataset.dirty = "false";
+  const initial = note || {};
+  const title = input("title", "text", initial.title);
+  title.maxLength = LIMITS.noteTitle;
+  title.placeholder = "Название заметки";
+  const textControl = textarea("text", initial.text, 10);
+  textControl.maxLength = LIMITS.noteText;
+  const category = select("category", [["", "Выберите категорию"], ["work", "Работа"], ["personal", "Личное"]], initial.category || "");
+  const priority = select("priority", [["high", "Высокий"], ["medium", "Средний"], ["low", "Низкий"]], initial.priority || "medium");
+  const pinned = input("isPinned", "checkbox", initial.isPinned);
+  const pinRow = node("label", "switch-row");
+  pinRow.append(pinned, node("span", "", "Закрепить заметку"));
+  const tags = input("tags", "text", initial.tags?.join(", ") || "");
+  tags.placeholder = "Через запятую";
+  const links = node("div", "repeater");
+  links.dataset.links = "";
+  renderLinks(links, initial.links || []);
+  const addLink = node("button", "button button--quiet button--small", "+ Ссылка");
+  addLink.type = "button";
+  addLink.addEventListener("click", () => {
+    const items = [...links.children].map((row) => ({
+      id: row.querySelector("[name='linkLabel']").dataset.id,
+      label: row.querySelector("[name='linkLabel']").value,
+      url: row.querySelector("[name='linkUrl']").value,
+    }));
+    renderLinks(links, [...items, { label: "", url: "" }]);
+    links.lastElementChild.querySelector("[name='linkLabel']").focus();
+    form.dataset.dirty = "true";
+  });
+  const linksError = node("small", "form-field__error");
+  linksError.dataset.errorFor = "links";
+  const linksGroup = node("section", "form-group");
+  linksGroup.append(node("h3", "", "Ссылки"), links, addLink, linksError);
+  const submit = node("button", "button button--primary", note ? "Сохранить изменения" : "Сохранить заметку");
+  submit.type = "submit";
+  const actions = node("div", "form-actions");
+  actions.append(submit);
+  form.append(
+    field("Название *", title),
+    field("Текст", textControl, `Обычный текст, до ${LIMITS.noteText} символов`),
+    field("Категория *", category),
+    field("Приоритет", priority),
+    pinRow,
+    field("Теги", tags, `До ${LIMITS.tags} тегов`),
+    linksGroup,
+    actions,
+  );
+  const updateSaveState = () => { submit.disabled = !validateNote(noteInputFromForm(form, note)).valid || form.dataset.saving === "true"; };
+  form.addEventListener("input", () => { form.dataset.dirty = "true"; updateSaveState(); });
+  form.addEventListener("change", () => { form.dataset.dirty = "true"; updateSaveState(); });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const candidate = noteInputFromForm(form, note);
+    const validation = validateNote(candidate);
+    if (!validation.valid) { showErrors(form, validation.errors); form.querySelector("[aria-invalid='true']")?.focus(); return; }
+    form.dataset.saving = "true";
+    submit.disabled = true;
+    try { await onSave(validation.normalized); form.dataset.dirty = "false"; }
+    catch (error) {
+      actions.prepend(node("div", "form-error", error.name === "VersionError" ? "Заметка уже изменена в другой вкладке." : "Не удалось сохранить заметку. Данные остались в форме."));
+    } finally { form.dataset.saving = "false"; updateSaveState(); }
+  });
+  updateSaveState();
+  window.requestAnimationFrame(() => title.focus());
+  return form;
+}
+
+export function createNoteViewer(note, actionDefinitions) {
+  const view = node("article", `task-view note-view priority-${note.priority}`);
+  if (note.text) view.append(node("p", "task-view__details", note.text));
+  const list = node("dl", "task-details");
+  list.append(
+    infoRow("Приоритет", PRIORITY_LABELS[note.priority]),
+    infoRow("Категория", CATEGORY_LABELS[note.category]),
+    infoRow("Закреплена", note.isPinned ? "Да" : "Нет"),
+  );
+  view.append(list);
+  if (note.tags.length) view.append(node("p", "task-view__tags", note.tags.map((tag) => `#${tag}`).join("  ")));
+  if (note.links.length) {
+    const links = node("div", "task-view__links");
+    note.links.forEach((item) => {
+      const anchor = node("a", "", item.label || item.url);
+      anchor.href = item.url;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      links.append(anchor);
+    });
+    view.append(node("h3", "", "Ссылки"), links);
+  }
+  view.append(node("p", "task-view__meta", `Создана ${new Date(note.createdAt).toLocaleString("ru-RU")} · Изменение ${note.revision}`));
+  const actions = node("div", "task-view__actions");
+  actionDefinitions.forEach(({ label, action, kind = "quiet" }) => {
+    const control = node("button", `button button--${kind}`, label);
+    control.type = "button";
+    control.dataset.noteAction = action;
+    actions.append(control);
+  });
+  view.append(actions);
+  return view;
+}
+
 export function formFoundationStatus() {
-  return Object.freeze({ taskFormsEnabled: true, noteFormsEnabled: false, plannedFor: "Этапы 2 и 5" });
+  return Object.freeze({ taskFormsEnabled: true, noteFormsEnabled: true, plannedFor: null });
 }

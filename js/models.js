@@ -13,10 +13,6 @@ function rawText(value) {
   return String(value ?? "").trim();
 }
 
-function limitedText(value, maxLength) {
-  return rawText(value).slice(0, maxLength);
-}
-
 function normalizeTags(values) {
   const seen = new Set();
   return (Array.isArray(values) ? values : []).reduce((result, item) => {
@@ -101,7 +97,7 @@ export function validateTask(input) {
   return {
     valid: Object.keys(errors).length === 0,
     errors,
-    normalized: { ...input, title, shortDescription, details, links, tags, checklist },
+    normalized: { title, shortDescription, details, links, tags, checklist },
   };
 }
 
@@ -147,21 +143,23 @@ export function updateTaskRecord(existing, patch, now = new Date()) {
 export function validateNote(input) {
   const errors = {};
   const title = rawText(input.title);
+  const text = rawText(input.text);
   if (!title) errors.title = "Введите название";
   else if (title.length > LIMITS.noteTitle) errors.title = `Не больше ${LIMITS.noteTitle} символов`;
+  if (text.length > LIMITS.noteText) errors.text = `Не больше ${LIMITS.noteText} символов`;
   if (!CATEGORIES.includes(input.category)) errors.category = "Выберите категорию";
   if (!PRIORITIES.includes(input.priority)) errors.priority = "Выберите приоритет";
   const links = normalizeLinks(input.links);
   validateLinks(links, errors);
   const tags = validateTags(input.tags, errors);
-  return { valid: Object.keys(errors).length === 0, errors, normalized: { ...input, title, links, tags } };
+  return { valid: Object.keys(errors).length === 0, errors, normalized: { ...input, title, text, links, tags } };
 }
 
 export function createNote(input, now = new Date()) {
   const base = {
     id: input.id || crypto.randomUUID(),
     title: input.title,
-    text: limitedText(input.text, LIMITS.noteText),
+    text: input.text || "",
     category: input.category,
     priority: input.priority || "medium",
     isPinned: Boolean(input.isPinned),
@@ -176,6 +174,11 @@ export function createNote(input, now = new Date()) {
   const result = validateNote(base);
   if (!result.valid) throw new ValidationError(result.errors);
   return { ...base, ...result.normalized };
+}
+
+export function updateNoteRecord(existing, patch, now = new Date()) {
+  if (!existing?.id) throw new TypeError("Для обновления нужна существующая заметка");
+  return createNote({ ...existing, ...patch, id: existing.id, createdAt: existing.createdAt, revision: existing.revision + 1 }, now);
 }
 
 export function validateSeries(input) {
