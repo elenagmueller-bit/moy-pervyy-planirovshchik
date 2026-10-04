@@ -1,5 +1,5 @@
 import { STORAGE_KEYS } from "./config.js";
-import { addCalendarDays, combineLocalDateTime, formatLocalDate, formatPeriodLabel, getISOWeek, getSystemTimeZone, monthMatrix, todayString } from "./date-utils.js";
+import { addCalendarDays, combineLocalDateTime, endOfISOWeek, formatLocalDate, formatPeriodLabel, getISOWeek, getSystemTimeZone, monthMatrix, startOfISOWeek, todayString } from "./date-utils.js";
 import { createTaskForm, createTaskViewer } from "./forms.js";
 import { filterTasks, isTaskOverdue, sortTasks, taskDeletionDate } from "./repositories.js";
 import { findTaskConflicts, renderWeekCalendar } from "./calendar-view.js";
@@ -151,6 +151,8 @@ function renderTaskCard(task, route, now = new Date()) {
     element("span", "badge", LABELS.status[task.status]),
   );
   if (overdue) badges.append(element("span", "badge badge--overdue", "Просрочено"));
+  if (task.recurrence) badges.append(element("span", "badge badge--recurring", "↻ Повторяется"));
+  if (task.seriesId && !task.isVirtual && !task.isSeriesRepresentative) badges.append(element("span", "badge", "Изменён экземпляр"));
   if (task.archivedAt) badges.append(element("span", "badge", "В архиве"));
   top.append(statusButton, copy, badges);
   const meta = element("div", "task-card__meta", formatTaskDate(task));
@@ -351,8 +353,23 @@ export function createUI({ state, router, repositories }) {
   }
 
   async function refreshTasks({ render = true } = {}) {
-    tasks = await repositories.tasks.getAll();
+    const current = state.get();
+    const start = current.route === "calendar" ? formatLocalDate(startOfISOWeek(current.visibleWeek)) : addCalendarDays(todayString(), -730);
+    const end = current.route === "calendar" ? formatLocalDate(endOfISOWeek(current.visibleWeek)) : addCalendarDays(todayString(), 730);
+    tasks = await repositories.recurrence.listRange(start, end, { includeSeriesRepresentatives: ["archive", "trash"].includes(current.route) });
     if (render) renderRoute(state.get());
+  }
+
+  function chooseSeriesScope(action) {
+    return showDialog({
+      title: `${action}: область серии`,
+      message: "К каким событиям применить действие?",
+      choices: [
+        { value: "instance", label: "Только это событие" },
+        { value: "future", label: "Это и последующие" },
+        { value: "series", label: "Всю серию", kind: "primary" },
+      ],
+    });
   }
 
   function revealPanel(eyebrow, title, body, context) {
@@ -413,7 +430,12 @@ export function createUI({ state, router, repositories }) {
           });
           if (!proceed) return false;
         }
-        if (task) await repositories.tasks.update(task.id, values, { expectedRevision: task.revision });
+        if (task?.seriesId) {
+          const scope = await chooseSeriesScope("Изменить");
+          await repositories.recurrence.changeOccurrence(task, values, scope);
+        } else if (task && values.recurrence) await repositories.recurrence.replaceTaskWithSeries(task.id, values);
+        else if (task) await repositories.tasks.update(task.id, values, { expectedRevision: task.revision });
+        else if (values.recurrence) await repositories.recurrence.createFromTask({ ...source, ...values });
         else await repositories.tasks.create({ ...source, ...values });
         await refreshTasks();
         showToast(task ? "Изменения сохранены" : "Задача добавлена в план");
@@ -438,7 +460,9 @@ export function createUI({ state, router, repositories }) {
   async function moveCalendarTask(task, patch) {
     const candidate = { ...task, ...patch };
     if (!(await confirmCalendarConflict(candidate))) return;
-    await repositories.tasks.update(task.id, patch, { expectedRevision: task.revision });
+    const scope = task.seriesId ? await chooseSeriesScope("Перенести") : "instance";
+    if (task.seriesId) await repositories.recurrence.changeOccurrence(task, patch, scope);
+    else await repositories.tasks.update(task.id, patch, { expectedRevision: task.revision });
     await refreshTasks();
     showToast("Задача перенесена");
   }
@@ -446,7 +470,9 @@ export function createUI({ state, router, repositories }) {
   async function resizeCalendarTask(task, durationMinutes) {
     const candidate = { ...task, durationMinutes };
     if (!(await confirmCalendarConflict(candidate))) return renderRoute(state.get());
-    await repositories.tasks.update(task.id, { durationMinutes }, { expectedRevision: task.revision });
+    const scope = task.seriesId ? await chooseSeriesScope("Изменить длительность") : "instance";
+    if (task.seriesId) await repositories.recurrence.changeOccurrence(task, { durationMinutes }, scope);
+    else await repositories.tasks.update(task.id, { durationMinutes }, { expectedRevision: task.revision });
     await refreshTasks();
     showToast("Длительность изменена");
   }
@@ -486,31 +512,41 @@ export function createUI({ state, router, repositories }) {
   async function executeTaskAction(task, action) {
     if (action === "view") return openTaskViewer(task);
     if (action === "edit") return openTaskForm(task);
+    let scope = "instance";
+    if (task.seriesId && ["cancel", "trash"].includes(action)) scope = await chooseSeriesScope(action === "cancel" ? "Отменить" : "Удалить");
     if (["cancel", "trash", "delete-forever"].includes(action) && !(await confirmTaskAction(task, action))) return;
     if (action === "archive" && task.status === "active" && !(await confirmTaskAction(task, action))) return;
     if (action === "complete") {
-      await repositories.tasks.complete(task.id);
+      if (task.seriesId) await repositories.recurrence.completeOccurrence(task);
+      else await repositories.tasks.complete(task.id);
       showToast("Готово — ещё одно дело завершено", "success");
     } else if (action === "reopen") {
-      await repositories.tasks.reopen(task.id);
+      if (task.seriesId) await repositories.recurrence.changeOccurrence(task, { status: "active", completedAt: null }, "instance");
+      else await repositories.tasks.reopen(task.id);
       showToast("Задача снова в работе");
     } else if (action === "cancel") {
-      await repositories.tasks.cancel(task.id);
+      if (task.seriesId) await repositories.recurrence.lifecycleOccurrence(task, "cancel", scope);
+      else await repositories.tasks.cancel(task.id);
       showToast("Задача отменена и перемещена в архив");
     } else if (action === "archive") {
-      await repositories.tasks.archive(task.id);
+      if (task.seriesId) await repositories.recurrence.lifecycleOccurrence(task, "archive", "instance");
+      else await repositories.tasks.archive(task.id);
       showToast("Задача перемещена в архив");
     } else if (action === "trash") {
-      await repositories.tasks.moveToTrash(task.id);
+      if (task.seriesId) await repositories.recurrence.lifecycleOccurrence(task, "trash", scope);
+      else await repositories.tasks.moveToTrash(task.id);
       showToast("Задача перемещена в корзину");
     } else if (action === "restore-archive") {
-      await repositories.tasks.restoreFromArchive(task.id);
+      if (task.isSeriesRepresentative) await repositories.recurrence.restoreSeriesRepresentative(task, "archive");
+      else await repositories.tasks.restoreFromArchive(task.id);
       showToast("Задача восстановлена из архива");
     } else if (action === "restore-trash") {
-      await repositories.tasks.restoreFromTrash(task.id);
+      if (task.isSeriesRepresentative) await repositories.recurrence.restoreSeriesRepresentative(task, "trash");
+      else await repositories.tasks.restoreFromTrash(task.id);
       showToast("Задача восстановлена из корзины");
     } else if (action === "delete-forever") {
-      await repositories.tasks.deleteForever(task.id);
+      if (task.isSeriesRepresentative) await repositories.recurrence.deleteSeriesForever(task);
+      else await repositories.tasks.deleteForever(task.id);
       showToast("Задача удалена навсегда");
     }
     await refreshTasks();
@@ -575,7 +611,7 @@ export function createUI({ state, router, repositories }) {
     if (!trashed.length) return;
     const confirmed = await showDialog({ title: "Очистить корзину?", message: `Будет навсегда удалено задач: ${trashed.length}.`, choices: [{ value: false, label: "Не сейчас" }, { value: true, label: "Очистить", kind: "danger" }] });
     if (!confirmed) return;
-    await Promise.all(trashed.map((task) => repositories.tasks.deleteForever(task.id)));
+    await Promise.all(trashed.map((task) => task.isSeriesRepresentative ? repositories.recurrence.deleteSeriesForever(task) : repositories.tasks.deleteForever(task.id)));
     await refreshTasks();
     showToast("Корзина очищена");
   }
@@ -672,7 +708,7 @@ export function createUI({ state, router, repositories }) {
     }
     updatePeriod(currentState);
     renderMiniCalendar(currentState);
-    if (currentState.route !== previous.route || currentState.visibleWeek.getTime() !== previous.visibleWeek.getTime()) renderRoute(currentState);
+    if (currentState.route !== previous.route || currentState.visibleWeek.getTime() !== previous.visibleWeek.getTime()) refreshTasks();
   });
 
   async function mount() {

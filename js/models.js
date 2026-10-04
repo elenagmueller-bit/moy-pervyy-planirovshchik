@@ -1,4 +1,4 @@
-import { CATEGORIES, LIMITS, PRIORITIES, RECURRENCE_FREQUENCIES, TASK_STATUSES } from "./config.js";
+import { CATEGORIES, LIMITS, PRIORITIES, RECURRENCE_END_TYPES, RECURRENCE_FREQUENCIES, RECURRENCE_UNITS, TASK_STATUSES } from "./config.js";
 import { isValidDateString, isValidTimeString, toUtcTimestamp } from "./date-utils.js";
 
 export class ValidationError extends Error {
@@ -94,6 +94,10 @@ export function validateTask(input) {
   const checklist = normalizeChecklist(input.checklist);
   if (checklist.length > LIMITS.checklist) errors.checklist = `Можно добавить не больше ${LIMITS.checklist} пунктов`;
   if (checklist.some((item) => !item.text)) errors.checklist = "Пустые пункты чек-листа нужно удалить";
+  if (input.recurrence) {
+    const recurrenceValidation = validateSeries({ ...input.recurrence, startDate: input.date });
+    Object.entries(recurrenceValidation.errors).forEach(([key, message]) => { errors[`recurrence.${key}`] = message; });
+  }
   return {
     valid: Object.keys(errors).length === 0,
     errors,
@@ -177,9 +181,19 @@ export function createNote(input, now = new Date()) {
 export function validateSeries(input) {
   const errors = {};
   if (!RECURRENCE_FREQUENCIES.includes(input.frequency)) errors.frequency = "Некорректная частота";
-  if (!Number.isInteger(input.interval) || input.interval < 1) errors.interval = "Интервал должен быть больше нуля";
+  const interval = input.interval ?? 1;
+  if (!Number.isInteger(interval) || interval < 1) errors.interval = "Интервал должен быть больше нуля";
   if (!isValidDateString(input.startDate)) errors.startDate = "Некорректная дата начала";
-  if (input.until && (!isValidDateString(input.until) || input.until < input.startDate)) errors.until = "Некорректная дата окончания";
+  if (input.frequency === "custom" && !RECURRENCE_UNITS.includes(input.intervalUnit)) errors.intervalUnit = "Выберите единицу интервала";
+  if (input.frequency === "weekdays") {
+    if (!Array.isArray(input.weekdays) || !input.weekdays.length || input.weekdays.some((day) => !Number.isInteger(day) || day < 1 || day > 7)) {
+      errors.weekdays = "Выберите хотя бы один день недели";
+    }
+  }
+  const endType = input.endType || "never";
+  if (!RECURRENCE_END_TYPES.includes(endType)) errors.endType = "Некорректное окончание серии";
+  if (endType === "date" && (!isValidDateString(input.until) || input.until < input.startDate)) errors.until = "Дата окончания не может быть раньше начала";
+  if (endType === "count" && (!Number.isInteger(input.count) || input.count < 1)) errors.count = "Количество повторений должно быть больше нуля";
   return { valid: Object.keys(errors).length === 0, errors };
 }
 

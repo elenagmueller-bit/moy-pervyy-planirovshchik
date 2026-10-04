@@ -125,7 +125,15 @@ export function taskInputFromForm(form, existing = null) {
     tags: parseTags(data.get("tags") || ""),
     checklist: rows.checklist,
     links: rows.links,
-    recurrence: existing?.recurrence || null,
+    recurrence: data.get("recurrenceFrequency") === "none" ? null : {
+      frequency: data.get("recurrenceFrequency"),
+      interval: Number(data.get("recurrenceInterval") || 1),
+      intervalUnit: data.get("recurrenceIntervalUnit") || "days",
+      weekdays: data.getAll("recurrenceWeekday").map(Number),
+      endType: data.get("recurrenceEndType") || "never",
+      until: data.get("recurrenceUntil") || null,
+      count: Number(data.get("recurrenceCount") || 1),
+    },
     googleSync: existing?.googleSync || null,
   };
 }
@@ -138,7 +146,7 @@ function clearErrors(form) {
 function showErrors(form, errors) {
   clearErrors(form);
   Object.entries(errors).forEach(([key, message]) => {
-    const name = key.startsWith("links.") ? "links" : key;
+    const name = key.startsWith("links.") ? "links" : key.startsWith("recurrence.") ? "recurrence" : key;
     const messageNode = form.querySelector(`[data-error-for="${name}"]`);
     if (messageNode) messageNode.textContent = message;
     const control = form.elements.namedItem(name);
@@ -221,8 +229,47 @@ export function createTaskForm({ task = null, defaults = null, onSave }) {
   const google = input("google", "checkbox", false);
   google.disabled = true;
   googleSwitch.append(google, node("span", "", "Добавить в Google Calendar"), node("small", "", "Станет доступно после подключения Google"));
-  const recurrence = select("recurrence", [["none", "Не повторяется"]], "none");
-  recurrence.disabled = true;
+  const rule = initial.recurrence || null;
+  const recurrence = select("recurrenceFrequency", [
+    ["none", "Не повторяется"], ["daily", "Каждый день"], ["weekly", "Каждую неделю"],
+    ["weekdays", "По выбранным дням недели"], ["monthly", "Каждый месяц"],
+    ["yearly", "Каждый год"], ["custom", "Свой интервал"],
+  ], rule?.frequency || "none");
+  const recurrenceInterval = input("recurrenceInterval", "number", rule?.interval || 1);
+  recurrenceInterval.min = "1";
+  const recurrenceUnit = select("recurrenceIntervalUnit", [["days", "дней"], ["weeks", "недель"], ["months", "месяцев"], ["years", "лет"]], rule?.intervalUnit || "days");
+  const customRow = node("div", "form-grid form-grid--time");
+  customRow.append(field("Каждые", recurrenceInterval), field("Единица", recurrenceUnit));
+  const weekdayRow = node("div", "weekday-picker");
+  [[1, "Пн"], [2, "Вт"], [3, "Ср"], [4, "Чт"], [5, "Пт"], [6, "Сб"], [7, "Вс"]].forEach(([value, label]) => {
+    const wrapper = node("label", "weekday-option");
+    const control = input("recurrenceWeekday", "checkbox", rule?.weekdays?.includes(value));
+    control.value = String(value);
+    wrapper.append(control, node("span", "", label));
+    weekdayRow.append(wrapper);
+  });
+  const recurrenceEnd = select("recurrenceEndType", [["never", "Никогда"], ["date", "В выбранную дату"], ["count", "После числа повторений"]], rule?.endType || "never");
+  const recurrenceUntil = input("recurrenceUntil", "date", rule?.until || initial.date || "");
+  const recurrenceCount = input("recurrenceCount", "number", rule?.count || 10);
+  recurrenceCount.min = "1";
+  const endValue = node("div", "recurrence-end-value");
+  const recurrenceError = node("small", "form-field__error");
+  recurrenceError.dataset.errorFor = "recurrence";
+  const recurrenceGroup = node("section", "form-group recurrence-group");
+  recurrenceGroup.append(node("h3", "", "Повторение"), field("Частота", recurrence), customRow, weekdayRow, field("Завершить", recurrenceEnd), endValue, recurrenceError);
+  const updateRecurrenceVisibility = () => {
+    const enabled = recurrence.value !== "none";
+    customRow.hidden = recurrence.value !== "custom";
+    weekdayRow.hidden = recurrence.value !== "weekdays";
+    recurrenceEnd.closest("label").hidden = !enabled;
+    endValue.replaceChildren();
+    recurrenceUntil.disabled = recurrenceEnd.value !== "date" || !enabled;
+    recurrenceCount.disabled = recurrenceEnd.value !== "count" || !enabled;
+    if (!recurrenceUntil.disabled) endValue.append(field("Последняя дата", recurrenceUntil, "Дата включается в серию"));
+    if (!recurrenceCount.disabled) endValue.append(field("Количество событий", recurrenceCount));
+  };
+  recurrence.addEventListener("change", updateRecurrenceVisibility);
+  recurrenceEnd.addEventListener("change", updateRecurrenceVisibility);
 
   const submit = node("button", "button button--primary", task ? "Сохранить изменения" : "Сохранить задачу");
   submit.type = "submit";
@@ -245,8 +292,9 @@ export function createTaskForm({ task = null, defaults = null, onSave }) {
   checklistGroup.append(node("h3", "", "Чек-лист"), checklist, addChecklist, checklistError);
   const linksGroup = node("section", "form-group");
   linksGroup.append(node("h3", "", "Ссылки"), links, addLink, linksError);
-  form.append(checklistGroup, linksGroup, field("Повторение", recurrence, "Настройка повторений появится на этапе 4"), googleSwitch, actions);
+  form.append(checklistGroup, linksGroup, recurrenceGroup, googleSwitch, actions);
   updateTimeVisibility();
+  updateRecurrenceVisibility();
 
   const updateSaveState = () => {
     const candidate = taskInputFromForm(form, task);
@@ -303,6 +351,7 @@ export function createTaskViewer(task, actionDefinitions) {
     infoRow("Приоритет", PRIORITY_LABELS[task.priority]),
     infoRow("Категория", CATEGORY_LABELS[task.category]),
     infoRow("Статус", task.status === "completed" ? "Выполнена" : task.status === "cancelled" ? "Отменена" : "Активна"),
+    ...(task.recurrence ? [infoRow("Повторение", recurrenceDescription(task.recurrence))] : []),
   );
   view.append(list);
   if (task.tags.length) view.append(node("p", "task-view__tags", task.tags.map((tag) => `#${tag}`).join("  ")));
@@ -333,6 +382,18 @@ export function createTaskViewer(task, actionDefinitions) {
   });
   view.append(actions);
   return view;
+}
+
+export function recurrenceDescription(rule) {
+  if (!rule) return "Не повторяется";
+  const frequency = {
+    daily: "Каждый день", weekly: "Каждую неделю", monthly: "Каждый месяц", yearly: "Каждый год",
+    weekdays: `По дням недели: ${(rule.weekdays || []).map((day) => ["", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"][day]).join(", ")}`,
+    custom: `Каждые ${rule.interval} ${{ days: "дн.", weeks: "нед.", months: "мес.", years: "г." }[rule.intervalUnit]}`,
+  }[rule.frequency] || "Повторяется";
+  if (rule.endType === "date") return `${frequency}, до ${new Date(`${rule.until}T12:00:00`).toLocaleDateString("ru-RU")}`;
+  if (rule.endType === "count") return `${frequency}, ${rule.count} событий`;
+  return frequency;
 }
 
 export function formFoundationStatus() {

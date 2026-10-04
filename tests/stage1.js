@@ -79,7 +79,7 @@ await check("Базовые модели заметки и серии", () => {
   assert(note.title === "Идея" && note.isPinned === false);
   const series = { frequency: "monthly", interval: 1, startDate: "2026-01-31", until: "2026-04-30" };
   assert(validateSeries(series).valid);
-  assert(JSON.stringify(previewSeries(series, 4)) === JSON.stringify(["2026-01-31", "2026-02-28", "2026-03-28", "2026-04-28"]));
+  assert(JSON.stringify(previewSeries(series, 4)) === JSON.stringify(["2026-01-31", "2026-02-28", "2026-03-31", "2026-04-30"]));
 });
 
 const testDatabaseName = `planner-stage1-test-${crypto.randomUUID()}`;

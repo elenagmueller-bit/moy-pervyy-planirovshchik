@@ -1,8 +1,8 @@
 export const APP_NAME = "Мой планировщик";
-export const APP_VERSION = "0.3.0";
+export const APP_VERSION = "0.4.0";
 export const DB_NAME = "personal-planner";
 export const DB_VERSION = 2;
-export const CACHE_VERSION = "planner-shell-v5";
+export const CACHE_VERSION = "planner-shell-v6";
 export const DEFAULT_ROUTE = "calendar";
 export const VALID_ROUTES = Object.freeze([
   "today",
@@ -19,7 +19,9 @@ export const VALID_ROUTES = Object.freeze([
 export const PRIORITIES = Object.freeze(["high", "medium", "low"]);
 export const CATEGORIES = Object.freeze(["work", "personal"]);
 export const TASK_STATUSES = Object.freeze(["active", "completed", "cancelled"]);
-export const RECURRENCE_FREQUENCIES = Object.freeze(["daily", "weekly", "monthly", "yearly"]);
+export const RECURRENCE_FREQUENCIES = Object.freeze(["daily", "weekly", "weekdays", "monthly", "yearly", "custom"]);
+export const RECURRENCE_UNITS = Object.freeze(["days", "weeks", "months", "years"]);
+export const RECURRENCE_END_TYPES = Object.freeze(["never", "date", "count"]);
 
 export const LIMITS = Object.freeze({
   taskTitle: 200,

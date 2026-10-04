@@ -92,7 +92,8 @@ function createTaskChip(task, { compact = false, onOpen, onMove, onResize } = {}
   chip.setAttribute("aria-label", `${task.title}. ${taskTimeLabel(task)}. ${PRIORITY_LABELS[task.priority]}. ${CATEGORY_LABELS[task.category]}`);
   if (task.status === "active") chip.draggable = true;
   const title = element("strong", "", task.title);
-  const meta = element("span", "", `${taskTimeLabel(task)} · ${CATEGORY_LABELS[task.category]} · ${PRIORITY_LABELS[task.priority]}`);
+  const seriesMark = task.seriesId && !task.isVirtual ? "↻ изменено · " : task.recurrence ? "↻ · " : "";
+  const meta = element("span", "", `${seriesMark}${taskTimeLabel(task)} · ${CATEGORY_LABELS[task.category]} · ${PRIORITY_LABELS[task.priority]}`);
   chip.append(title, meta);
   chip.addEventListener("click", (event) => {
     if (!event.target.closest("[data-resize-handle]")) onOpen?.(task);

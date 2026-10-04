@@ -345,6 +345,12 @@ kbd { border: 1px solid var(--line-strong); border-radius: 5px; padding: 1px 5px
 .switch-row small { grid-column: 2; color: var(--muted); }
 .switch-row.is-disabled { opacity: .65; }
 .form-group { display: grid; gap: 8px; }
+.weekday-picker { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
+.weekday-option { display: grid; place-items: center; gap: 4px; padding: 7px 3px; border: 1px solid var(--line); border-radius: 9px; font-size: 11px; color: var(--muted); cursor: pointer; }
+.weekday-option:has(input:checked) { background: rgba(200,196,126,.24); border-color: var(--bronze); color: var(--ink); }
+.weekday-option input { margin: 0; }
+.recurrence-end-value:empty { display: none; }
+.badge--recurring { background: rgba(190,200,200,.35); color: #45585b; }
 .form-group h3, .task-view h3 { margin: 4px 0 0; font-size: 12px; }
 .repeater { display: grid; gap: 7px; }
 .repeater-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 7px; }
